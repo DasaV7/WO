@@ -3,20 +3,20 @@ import pandas as pd
 import requests
 import time
 from datetime import datetime, timedelta
-from streamlit_lightweight_charts import render_lightweight_charts
+from streamlit_lightweight_charts import renderLightweightCharts
 
 st.set_page_config(page_title="Options Radar", page_icon="📈", layout="wide")
 
-# Light clean theme
+# Light clean Apple-inspired theme
 st.markdown("""
 <style>
     .main {background-color: #f0f4f8;}
     .stButton>button {border-radius: 10px; font-weight: 700;}
-    .metric-label {font-size: 10px; font-weight: 800; letter-spacing: 0.8px; text-transform: uppercase; color: #94a3b8;}
     .badge-call {background:#fef3c7; color:#92400e; padding:4px 10px; border-radius:5px; font-size:10px; font-weight:800;}
     .badge-put {background:#d1fae5; color:#065f46; padding:4px 10px; border-radius:5px; font-size:10px; font-weight:800;}
     .badge-wait {background:#f1f5f9; color:#64748b; padding:4px 10px; border-radius:5px; font-size:10px; font-weight:800;}
     .badge-notrade {background:#fee2e2; color:#991b1b; padding:4px 10px; border-radius:5px; font-size:10px; font-weight:800;}
+    .alert-red {background:#fee2e2; border:1.5px solid #fca5a5; border-radius:10px; padding:12px; color:#7f1d1d;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -42,11 +42,9 @@ def fetch_quote(sym):
         return None
     try:
         r = requests.get(f"https://finnhub.io/api/v1/quote?symbol={sym}&token={st.session_state.finnhub_key}", timeout=10)
-        if r.ok:
-            return r.json()
+        return r.json() if r.ok else None
     except:
-        pass
-    return None
+        return None
 
 def fetch_candles(sym):
     if not st.session_state.finnhub_key:
@@ -77,9 +75,9 @@ def calc_rv(df):
     return round(rv, 1)
 
 def estimate_options(price, strike_call, strike_put, dte, rv):
-    iv = rv if rv else 85
-    iv_val = iv / 100
-    t = max(dte, 1) / 365
+    iv = rv if rv else 85.0
+    iv_val = iv / 100.0
+    t = max(dte, 1) / 365.0
     sqrt_t = t ** 0.5
     atm_prem = iv_val * sqrt_t * price * 0.3989
     call_otm = max(0.05, 1 - abs(strike_call - price) / price * 0.75)
@@ -101,7 +99,6 @@ def estimate_options(price, strike_call, strike_put, dte, rv):
 
 def next_expiry():
     target = datetime.now() + timedelta(days=30)
-    # Find 3rd Friday
     d = datetime(target.year, target.month, 1)
     fridays = []
     while d.month == target.month:
@@ -110,10 +107,10 @@ def next_expiry():
         d += timedelta(days=1)
     if len(fridays) >= 3:
         return fridays[2]
-    # Next month
+    # Next month fallback
     d = datetime(target.year, target.month + 1, 1)
     fridays = []
-    while d.month == target.month + 1 or (target.month == 12 and d.month == 1):
+    while len(fridays) < 3:
         if d.weekday() == 4:
             fridays.append(d)
         d += timedelta(days=1)
@@ -124,7 +121,7 @@ with st.sidebar:
     st.title("📈 Options Radar")
     st.caption("Leveraged ETF Options • 30DTE Seller")
     if not st.session_state.finnhub_key:
-        key = st.text_input("Finnhub API Key", type="password", help="Free at finnhub.io")
+        key = st.text_input("Finnhub API Key", type="password", help="Get free key at finnhub.io")
         if st.button("Save Key"):
             st.session_state.finnhub_key = key
             st.success("Key saved for this session")
@@ -144,21 +141,23 @@ with tab1:  # Dashboard
         for sym in TICKERS:
             q = fetch_quote(sym)
             if q and q.get("c"):
-                rv = calc_rv(fetch_candles(sym))
+                df_candles = fetch_candles(sym)
+                rv = calc_rv(df_candles)
                 st.session_state.market_data[sym] = {
                     "price": round(q["c"], 2),
                     "change": round(q.get("dp", 0), 2),
                     "rv": rv
                 }
-        st.success("Data refreshed")
+        st.success("Live data + RV updated")
+        st.rerun()
 
     if st.session_state.market_data:
         df = pd.DataFrame.from_dict(st.session_state.market_data, orient="index")
         st.dataframe(df, use_container_width=True)
 
-    vix = st.session_state.get("vix")
-    if vix:
-        st.metric("VIX", vix, delta=None, delta_color="normal" if float(vix) < VIX_LIMIT else "inverse")
+    vix_val = st.session_state.get("vix")
+    if vix_val:
+        st.metric("VIX", vix_val, delta=None, delta_color="normal" if float(vix_val) < VIX_LIMIT else "inverse")
 
 with tab2:  # Trades
     st.subheader("Trade Signals & Logging")
@@ -172,7 +171,7 @@ with tab2:  # Trades
         chg = d.get("change", 0)
         signal = "NO TRADE"
         badge_class = "badge-notrade"
-        if float(vix or 0) >= VIX_LIMIT:
+        if float(vix_val or 0) >= VIX_LIMIT:
             signal = "NO TRADE (VIX HIGH)"
         elif abs(chg) >= MOVE_PCT:
             if chg >= MOVE_PCT:
@@ -185,8 +184,8 @@ with tab2:  # Trades
             signal = "WAIT"
             badge_class = "badge-wait"
 
-        with st.expander(f"{ticker} — {signal}"):
-            st.write(f"Price: ${price} | Change: {chg}% | RV: {rv}%")
+        with st.expander(f"{ticker} — **{signal}**"):
+            st.write(f"Price: **${price}** | Change: **{chg}%** | RV: **{rv}%**")
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("Log Call", key=f"call_{ticker}"):
@@ -223,7 +222,7 @@ with tab2:  # Trades
     for trade in st.session_state.trades:
         if trade.get("status") == "open":
             with st.expander(f"{trade['ticker']} {trade['type'].upper()} @ ${trade['strike']}"):
-                st.write(f"Entry Premium: ${trade.get('entry_premium', '—')}")
+                st.write(f"Entry Premium: **${trade.get('entry_premium', '—')}**")
                 if st.button("Mark Closed (50% target)", key=trade["id"]):
                     trade["status"] = "closed"
                     st.success("Trade closed at target")
@@ -236,11 +235,10 @@ with tab3:  # Chart
         df = fetch_candles(ticker)
         if df is not None:
             st.session_state.chart_data[ticker] = df
-            st.success(f"Loaded {len(df)} days")
+            st.success(f"Loaded {len(df)} days for {ticker}")
 
     if ticker in st.session_state.chart_data:
         df = st.session_state.chart_data[ticker]
-        # Convert to Lightweight Charts format
         chart_data = []
         for _, row in df.iterrows():
             chart_data.append({
@@ -250,22 +248,29 @@ with tab3:  # Chart
                 "low": float(row["low"]),
                 "close": float(row["close"])
             })
-        render_lightweight_charts([{
+        renderLightweightCharts([{
             "series": [{"type": "candlestick", "data": chart_data}],
             "options": {"height": 420}
         }], key=f"lc_{ticker}")
+    else:
+        st.info("Click 'Load Candles' to see real candlestick chart")
 
 with tab4:  # Calendar
     st.subheader("Event Calendar (No-Trade Days)")
-    st.info("Avoid new trades on high VIX or major events (FOMC, CPI, Rate decisions)")
+    st.info("Avoid new trades on high VIX (≥25) or major events (FOMC, CPI, Rate decisions)")
 
-# Refresh button
-if st.button("Refresh All"):
+# Global refresh
+if st.button("🔄 Refresh All Data"):
     for sym in TICKERS:
         q = fetch_quote(sym)
         if q and q.get("c"):
-            rv = calc_rv(fetch_candles(sym))
-            st.session_state.market_data[sym] = {"price": round(q["c"],2), "change": round(q.get("dp",0),2), "rv": rv}
+            df_candles = fetch_candles(sym)
+            rv = calc_rv(df_candles)
+            st.session_state.market_data[sym] = {
+                "price": round(q["c"], 2),
+                "change": round(q.get("dp", 0), 2),
+                "rv": rv
+            }
     st.rerun()
 
-st.caption("Options Radar • Powered by Finnhub + Lightweight Charts")
+st.caption("Options Radar • Finnhub + Lightweight Charts • Streamlit Conversion")
