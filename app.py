@@ -13,7 +13,7 @@ st.markdown("""
     .main {background-color: #FAFAFA;}
     .block-container {padding-top: 2rem;}
     
-    /* Soft cards - no sharp borders */
+    /* Soft cards */
     .stCard, div[data-testid="stExpander"] {
         background-color: #FFFFFF;
         border-radius: 18px;
@@ -21,10 +21,8 @@ st.markdown("""
         border: 1px solid rgba(0,0,0,0.06);
     }
     
-    /* Gradient buttons with smooth effects */
+    /* Gradient buttons with hover */
     .stButton>button {
-        background: linear-gradient(135deg, #0071E3, #4A9EFF);
-        color: white;
         border-radius: 9999px;
         font-weight: 700;
         border: none;
@@ -38,9 +36,6 @@ st.markdown("""
     }
     
     .metric-label {font-size:13px; font-weight:600; letter-spacing:0.8px; text-transform:uppercase; color:#86868B;}
-    .green {color:#34C759;}
-    .red {color:#FF3B30;}
-    .gold {color:#FF9500;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -174,10 +169,9 @@ with st.sidebar:
 # Tabs
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "🔁 CSP Trades", "🚀 LEAP Trades", "📈 Super Chart", "📅 Calendar", "⚙️ Settings"])
 
-with tab1:  # Revamped Dashboard
+with tab1:
     st.subheader("Matt’s Profit Recycling Loop")
     st.info("CSP on red days → Close at 50% → 50% income, 50% to LEAP fund (house money only)")
-
     col1, col2, col3, col4 = st.columns(4)
     with col1: st.metric("House Money", f"${st.session_state.leap_fund:,.0f}")
     with col2: 
@@ -191,15 +185,6 @@ with tab1:  # Revamped Dashboard
         avg_days = round(sum(t.get("days_active", 0) for t in closed) / len(closed), 1) if closed else 0
         st.metric("Avg Days to Close", f"{avg_days} days")
 
-    # Graduation Levels
-    st.subheader("Graduation Progress")
-    level = 1
-    if total_pnl >= 1000: level = 2
-    if st.session_state.leap_fund > 0: level = 3
-    if len(closed) >= 5: level = 4
-    st.progress(level/4)
-    st.caption(f"Level {level}/4 • Next milestone: ${5000 if level < 2 else 50000 if level < 3 else 100000} account")
-
     if st.button("🔄 Safe Refresh (≤50 calls/min)"):
         safe_batch_update(st.session_state.tickers)
         st.success("Batch update completed safely")
@@ -208,49 +193,67 @@ with tab1:  # Revamped Dashboard
     if st.session_state.market_data:
         st.dataframe(pd.DataFrame.from_dict(st.session_state.market_data, orient="index"), use_container_width=True)
 
-with tab2:  # CSP Trades
+with tab2:  # CSP Trades - Color-coded buttons
     st.subheader("CSP Trades • Red Day Sell Put / Green Day Sell Call")
     for ticker in st.session_state.tickers:
         d = st.session_state.market_data.get(ticker, {})
         price = d.get("price")
         rv = d.get("rv")
-        if not price: continue
+        if not price: 
+            st.write(f"Waiting for data on {ticker}...")
+            continue
 
         chg = d.get("change", 0)
         signal = "NO TRADE"
+        button_color = "gray"
+        enable_put = False
+        enable_call = False
+
         if float(st.session_state.get("vix") or 0) >= VIX_LIMIT:
             signal = "NO TRADE (VIX HIGH)"
+            button_color = "gray"
         elif chg <= -MOVE_PCT:
             signal = "SELL PUT (Red Day >5%)"
+            button_color = "red"
+            enable_put = True
         elif chg >= MOVE_PCT:
             signal = "SELL CALL (Green Day >5%)"
+            button_color = "green"
+            enable_call = True
 
         with st.expander(f"{ticker} — **{signal}**"):
             st.write(f"Price: **${price}** | Change: **{chg}%** | RV: **{rv if rv else 'Not loaded yet'}**")
             if not rv:
                 st.warning("RV data not loaded yet – trading based on price action only")
 
-            if chg <= -MOVE_PCT:
-                if st.button("Log Sell Put", key=f"put_{ticker}"):
-                    expiry = next_expiry()
-                    opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
-                    st.session_state.trades.append({
-                        "id": int(time.time()), "type":"CSP Put", "ticker":ticker, "strike":round(price*0.90,2),
-                        "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium":opts["put_mid"], "status":"open", "pnl":0
-                    })
-                    st.success("Sell Put logged")
-                    st.rerun()
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                if enable_put:
+                    if st.button("Log Sell Put", key=f"put_{ticker}", type="secondary" if button_color == "gray" else "primary"):
+                        expiry = next_expiry()
+                        opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
+                        st.session_state.trades.append({
+                            "id": int(time.time()), "type":"CSP Put", "ticker":ticker, "strike":round(price*0.90,2),
+                            "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium":opts["put_mid"], "status":"open", "pnl":0
+                        })
+                        st.success("Sell Put logged")
+                        st.rerun()
+                else:
+                    st.button("Log Sell Put", disabled=True)
 
-            if chg >= MOVE_PCT:
-                if st.button("Log Sell Call", key=f"call_{ticker}"):
-                    expiry = next_expiry()
-                    opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
-                    st.session_state.trades.append({
-                        "id": int(time.time()), "type":"CSP Call", "ticker":ticker, "strike":round(price*1.10,2),
-                        "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium":opts["call_mid"], "status":"open", "pnl":0
-                    })
-                    st.success("Sell Call logged")
-                    st.rerun()
+            with col_btn2:
+                if enable_call:
+                    if st.button("Log Sell Call", key=f"call_{ticker}", type="secondary" if button_color == "gray" else "primary"):
+                        expiry = next_expiry()
+                        opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
+                        st.session_state.trades.append({
+                            "id": int(time.time()), "type":"CSP Call", "ticker":ticker, "strike":round(price*1.10,2),
+                            "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium":opts["call_mid"], "status":"open", "pnl":0
+                        })
+                        st.success("Sell Call logged")
+                        st.rerun()
+                else:
+                    st.button("Log Sell Call", disabled=True)
 
     st.subheader("Open CSP Trades")
     for t in st.session_state.trades:
@@ -305,11 +308,10 @@ with tab3:  # LEAP Trades
                 st.success("Half sold • Profits added to House Money")
                 st.rerun()
 
-with tab4:  # Super Chart with RSI
+with tab4:  # Super Chart
     st.subheader("TradingView Super Chart + RSI")
     ticker = st.selectbox("Select Leveraged Ticker", st.session_state.tickers, key="superchart_ticker")
     main_ticker = MAIN_TICKER_MAP.get(ticker, ticker)
-
     st.write(f"**Showing:** {ticker} (with Volume + RSI) + **{main_ticker}** (overlay)")
 
     tv_html = f"""
