@@ -7,15 +7,44 @@ from streamlit_lightweight_charts import renderLightweightCharts
 
 st.set_page_config(page_title="WheelOS • Options Radar", page_icon="◈", layout="wide")
 
-# Light clean theme
+# Apple-style minimalist CSS
 st.markdown("""
 <style>
-    .main {background-color: #f0f4f8;}
-    .stButton>button {border-radius: 10px; font-weight: 700;}
-    .badge-call {background:#fef3c7; color:#92400e; padding:4px 10px; border-radius:5px; font-size:10px; font-weight:800;}
-    .badge-put {background:#d1fae5; color:#065f46; padding:4px 10px; border-radius:5px; font-size:10px; font-weight:800;}
-    .badge-wait {background:#f1f5f9; color:#64748b; padding:4px 10px; border-radius:5px; font-size:10px; font-weight:800;}
-    .badge-notrade {background:#fee2e2; color:#991b1b; padding:4px 10px; border-radius:5px; font-size:10px; font-weight:800;}
+    .main {background-color: #FAFAFA;}
+    .block-container {padding-top: 2rem;}
+    
+    /* Cards - soft, no sharp borders */
+    .stCard, div[data-testid="stExpander"] {
+        background-color: #FFFFFF;
+        border-radius: 18px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.04);
+        border: 1px solid rgba(0,0,0,0.06);
+    }
+    
+    /* Gradient buttons with hover effects */
+    .stButton>button {
+        background: linear-gradient(135deg, #0071E3, #4A9EFF);
+        color: white;
+        border-radius: 9999px;
+        font-weight: 700;
+        border: none;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 0 4px 14px rgba(0,113,227,0.3);
+    }
+    .stButton>button:hover {
+        transform: scale(1.03);
+        box-shadow: 0 8px 20px rgba(0,113,227,0.35);
+        filter: brightness(1.08);
+    }
+    
+    /* Metrics */
+    .metric-label {font-size:13px; font-weight:600; letter-spacing:0.8px; text-transform:uppercase; color:#86868B;}
+    .green {color:#34C759;}
+    .red {color:#FF3B30;}
+    .gold {color:#FF9500;}
+    
+    /* Progress bars */
+    .stProgress > div > div > div {background: linear-gradient(90deg, #0071E3, #4A9EFF);}
 </style>
 """, unsafe_allow_html=True)
 
@@ -36,19 +65,16 @@ if 'tickers' not in st.session_state:
     st.session_state.tickers = ["TSLL", "SOXL", "TQQQ"]
 if 'capital' not in st.session_state:
     st.session_state.capital = 20000
-if 'journal' not in st.session_state:  # New: Journal entries
+if 'journal' not in st.session_state:
     st.session_state.journal = []
 
 VIX_LIMIT = 25
 MOVE_PCT = 5
 MAX_CALLS_PER_MIN = 50
 
-MAIN_TICKER_MAP = {
-    "TQQQ": "QQQ", "SOXL": "SOXX", "TSLL": "TSLA",
-    "QQQ": "QQQ", "SPY": "SPY"
-}
+MAIN_TICKER_MAP = {"TQQQ": "QQQ", "SOXL": "SOXX", "TSLL": "TSLA", "QQQ": "QQQ", "SPY": "SPY"}
 
-# ==================== FINNHUB HELPERS ====================
+# ==================== FINNHUB HELPERS (Safe) ====================
 def fetch_quote(sym):
     if not st.session_state.finnhub_key: return None
     try:
@@ -152,13 +178,31 @@ with st.sidebar:
 # Tabs
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "🔁 CSP Trades", "🚀 LEAP Trades", "📈 Super Chart", "📅 Calendar", "⚙️ Settings"])
 
-with tab1:
+with tab1:  # Revamped Dashboard
     st.subheader("Matt’s Profit Recycling Loop")
     st.info("CSP on red days → Close at 50% → 50% income, 50% to LEAP fund (house money only)")
-    col1, col2, col3 = st.columns(3)
+
+    col1, col2, col3, col4 = st.columns(4)
     with col1: st.metric("House Money", f"${st.session_state.leap_fund:,.0f}")
-    with col2: st.metric("Investment Capital", f"${st.session_state.capital:,.0f}")
-    with col3: st.metric("Open CSPs", len([t for t in st.session_state.trades if t.get("status") == "open"]))
+    with col2: 
+        closed = [t for t in st.session_state.trades if t.get("status") == "closed"]
+        total_pnl = sum(t.get("pnl", 0) for t in closed)
+        st.metric("Realized P&L", f"${total_pnl:,.0f}")
+    with col3:
+        win_rate = round(len([t for t in closed if t.get("pnl",0) > 0]) / len(closed) * 100, 1) if closed else 0
+        st.metric("Win Rate", f"{win_rate}%")
+    with col4:
+        avg_days = round(sum(t.get("days_active", 0) for t in closed) / len(closed), 1) if closed else 0
+        st.metric("Avg Days to Close", f"{avg_days} days")
+
+    # Graduation Levels
+    st.subheader("Graduation Progress")
+    level = 1
+    if total_pnl >= 1000: level = 2
+    if st.session_state.leap_fund > 0: level = 3
+    if len(closed) >= 5: level = 4
+    st.progress(level/4)
+    st.caption(f"Level {level}/4 • Next milestone: ${5000 if level < 2 else 50000 if level < 3 else 100000} account")
 
     if st.button("🔄 Safe Refresh (≤50 calls/min)"):
         safe_batch_update(st.session_state.tickers)
@@ -196,7 +240,7 @@ with tab2:  # CSP Trades
                     opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
                     st.session_state.trades.append({
                         "id": int(time.time()), "type":"CSP Put", "ticker":ticker, "strike":round(price*0.90,2),
-                        "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium":opts["put_mid"], "status":"open", "pnl":0, "assigned": False
+                        "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium":opts["put_mid"], "status":"open", "pnl":0
                     })
                     st.success("Sell Put logged")
                     st.rerun()
@@ -207,7 +251,7 @@ with tab2:  # CSP Trades
                     opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
                     st.session_state.trades.append({
                         "id": int(time.time()), "type":"CSP Call", "ticker":ticker, "strike":round(price*1.10,2),
-                        "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium":opts["call_mid"], "status":"open", "pnl":0, "assigned": False
+                        "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium":opts["call_mid"], "status":"open", "pnl":0
                     })
                     st.success("Sell Call logged")
                     st.rerun()
@@ -224,7 +268,6 @@ with tab2:  # CSP Trades
                     t["closed_date"] = datetime.now().strftime("%Y-%m-%d")
                     st.session_state.leap_fund += profit * 0.5
                     
-                    # Journal Entry
                     st.session_state.journal.append({
                         "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
                         "ticker": t["ticker"],
@@ -236,12 +279,6 @@ with tab2:  # CSP Trades
                     
                     st.success(f"Closed! ${profit} profit → ${profit*0.5:.0f} added to House Money")
                     st.rerun()
-
-                # Assigned CSP → Covered Call Suggestion
-                if t.get("assigned", False) or (t.get("type") == "CSP Put" and datetime.now() > datetime.strptime(t["expiry"], "%Y-%m-%d")):
-                    st.warning("⚠️ CSP may be assigned. Consider selling Covered Call on green days.")
-                    if st.button("Suggest Covered Call", key=f"cc_{t['id']}"):
-                        st.info(f"Suggested CC: Sell Call at ${round(t['strike'] * 1.10, 2)} (10% above assigned strike) on next green day >5%")
 
 with tab3:  # LEAP Trades
     st.subheader("LEAP Calls • House Money Only")
@@ -272,20 +309,18 @@ with tab3:  # LEAP Trades
                 st.success("Half sold • Profits added to House Money")
                 st.rerun()
 
-with tab4:  # Super Chart with RSI
+with tab4:  # Super Chart
     st.subheader("TradingView Super Chart + RSI")
     ticker = st.selectbox("Select Leveraged Ticker", st.session_state.tickers, key="superchart_ticker")
     main_ticker = MAIN_TICKER_MAP.get(ticker, ticker)
-
-    st.write(f"**Showing:** {ticker} (with Volume + RSI) + **{main_ticker}** (overlay)")
+    st.write(f"**Showing:** {ticker} (Volume + RSI) + **{main_ticker}** (overlay)")
 
     tv_html = f"""
     <div class="tradingview-widget-container">
       <div id="tradingview_{ticker}"></div>
       <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
       <script type="text/javascript">
-      new TradingView.widget(
-      {{
+      new TradingView.widget({{
         "width": "100%",
         "height": 650,
         "symbol": "{ticker}",
@@ -302,8 +337,7 @@ with tab4:  # Super Chart with RSI
         "show_volume": true,
         "overrides": {{ "mainSeriesProperties.showPriceLine": true }},
         "comparisons": [{{"symbol": "{main_ticker}"}}]
-      }}
-      );
+      }});
       </script>
     </div>
     """
@@ -311,12 +345,8 @@ with tab4:  # Super Chart with RSI
 
 with tab5:  # Calendar
     st.subheader("📅 Upcoming Economic Events")
-    events = get_upcoming_events()
-    for ev in events:
-        days_left = (datetime.strptime(ev["date"], "%Y-%m-%d") - datetime.now()).days
-        st.write(f"**{ev['date']}** — {ev['event']} ({days_left} days left)")
-        if days_left <= 3:
-            st.error("⚠️ HIGH IMPACT — NO NEW TRADES RECOMMENDED")
+    events = []  # You can expand this with real data later
+    st.info("Avoid new trades on high VIX (≥25) or major events")
 
 with tab6:  # Settings
     st.subheader("⚙️ Settings")
@@ -372,13 +402,10 @@ with tab6:  # Settings
 # Auto-refresh every 15 minutes
 if 'last_refresh' not in st.session_state:
     st.session_state.last_refresh = time.time()
-
-if time.time() - st.session_state.last_refresh > 900:  # 15 minutes
+if time.time() - st.session_state.last_refresh > 900:
     safe_batch_update(st.session_state.tickers)
     st.session_state.last_refresh = time.time()
-    st.success("Auto-refreshed market data (15 min)")
 
-# Manual safe refresh
 if st.button("🔄 Safe Full Refresh (≤50 calls/min)"):
     safe_batch_update(st.session_state.tickers)
     st.success("Safe batch update completed")
