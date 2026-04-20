@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import time
 from datetime import datetime, timedelta
+from streamlit_lightweight_charts import renderLightweightCharts
 
 st.set_page_config(page_title="WheelOS • Options Radar", page_icon="◈", layout="wide")
 
@@ -35,18 +36,16 @@ if 'tickers' not in st.session_state:
     st.session_state.tickers = ["TSLL", "SOXL", "TQQQ"]
 if 'capital' not in st.session_state:
     st.session_state.capital = 20000
+if 'journal' not in st.session_state:  # New: Journal entries
+    st.session_state.journal = []
 
 VIX_LIMIT = 25
 MOVE_PCT = 5
 MAX_CALLS_PER_MIN = 50
 
-# Main ticker mapping for overlay (e.g. TQQQ → QQQ)
 MAIN_TICKER_MAP = {
-    "TQQQ": "QQQ",
-    "SOXL": "SOXX",
-    "TSLL": "TSLA",
-    "QQQ": "QQQ",
-    "SPY": "SPY"
+    "TQQQ": "QQQ", "SOXL": "SOXX", "TSLL": "TSLA",
+    "QQQ": "QQQ", "SPY": "SPY"
 }
 
 # ==================== FINNHUB HELPERS ====================
@@ -132,7 +131,6 @@ if not st.session_state.finnhub_key:
     st.title("Welcome to WheelOS")
     st.markdown("### First Time Setup")
     st.info("Get your free Finnhub API key at [finnhub.io](https://finnhub.io) → Dashboard → API Key")
-    
     key = st.text_input("Paste your Finnhub API Key", type="password")
     if st.button("Save & Launch App", type="primary"):
         if key.strip():
@@ -154,7 +152,7 @@ with st.sidebar:
 # Tabs
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "🔁 CSP Trades", "🚀 LEAP Trades", "📈 Super Chart", "📅 Calendar", "⚙️ Settings"])
 
-with tab1:  # Dashboard (unchanged from previous)
+with tab1:
     st.subheader("Matt’s Profit Recycling Loop")
     st.info("CSP on red days → Close at 50% → 50% income, 50% to LEAP fund (house money only)")
     col1, col2, col3 = st.columns(3)
@@ -170,15 +168,13 @@ with tab1:  # Dashboard (unchanged from previous)
     if st.session_state.market_data:
         st.dataframe(pd.DataFrame.from_dict(st.session_state.market_data, orient="index"), use_container_width=True)
 
-with tab2:  # CSP Trades (unchanged logic, but with RV fallback)
+with tab2:  # CSP Trades
     st.subheader("CSP Trades • Red Day Sell Put / Green Day Sell Call")
     for ticker in st.session_state.tickers:
         d = st.session_state.market_data.get(ticker, {})
         price = d.get("price")
         rv = d.get("rv")
-        if not price: 
-            st.write(f"Waiting for data on {ticker}...")
-            continue
+        if not price: continue
 
         chg = d.get("change", 0)
         signal = "NO TRADE"
@@ -200,7 +196,7 @@ with tab2:  # CSP Trades (unchanged logic, but with RV fallback)
                     opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
                     st.session_state.trades.append({
                         "id": int(time.time()), "type":"CSP Put", "ticker":ticker, "strike":round(price*0.90,2),
-                        "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium":opts["put_mid"], "status":"open", "pnl":0
+                        "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium":opts["put_mid"], "status":"open", "pnl":0, "assigned": False
                     })
                     st.success("Sell Put logged")
                     st.rerun()
@@ -211,7 +207,7 @@ with tab2:  # CSP Trades (unchanged logic, but with RV fallback)
                     opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
                     st.session_state.trades.append({
                         "id": int(time.time()), "type":"CSP Call", "ticker":ticker, "strike":round(price*1.10,2),
-                        "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium":opts["call_mid"], "status":"open", "pnl":0
+                        "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium":opts["call_mid"], "status":"open", "pnl":0, "assigned": False
                     })
                     st.success("Sell Call logged")
                     st.rerun()
@@ -225,11 +221,29 @@ with tab2:  # CSP Trades (unchanged logic, but with RV fallback)
                     profit = round(t["entry_premium"] * 0.5, 2)
                     t["pnl"] = profit
                     t["status"] = "closed"
+                    t["closed_date"] = datetime.now().strftime("%Y-%m-%d")
                     st.session_state.leap_fund += profit * 0.5
+                    
+                    # Journal Entry
+                    st.session_state.journal.append({
+                        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "ticker": t["ticker"],
+                        "type": t["type"],
+                        "action": "Closed at 50%",
+                        "profit": profit,
+                        "note": "Profit recycled to LEAP fund"
+                    })
+                    
                     st.success(f"Closed! ${profit} profit → ${profit*0.5:.0f} added to House Money")
                     st.rerun()
 
-with tab3:  # LEAP Trades (unchanged)
+                # Assigned CSP → Covered Call Suggestion
+                if t.get("assigned", False) or (t.get("type") == "CSP Put" and datetime.now() > datetime.strptime(t["expiry"], "%Y-%m-%d")):
+                    st.warning("⚠️ CSP may be assigned. Consider selling Covered Call on green days.")
+                    if st.button("Suggest Covered Call", key=f"cc_{t['id']}"):
+                        st.info(f"Suggested CC: Sell Call at ${round(t['strike'] * 1.10, 2)} (10% above assigned strike) on next green day >5%")
+
+with tab3:  # LEAP Trades
     st.subheader("LEAP Calls • House Money Only")
     st.metric("House Money Available", f"${st.session_state.leap_fund:,.0f}")
     leap_ticker = st.selectbox("LEAP Ticker", st.session_state.tickers, key="leap_sel")
@@ -258,16 +272,13 @@ with tab3:  # LEAP Trades (unchanged)
                 st.success("Half sold • Profits added to House Money")
                 st.rerun()
 
-with tab4:  # Super Chart Tab - TradingView Widget
-    st.subheader("TradingView Super Chart")
+with tab4:  # Super Chart with RSI
+    st.subheader("TradingView Super Chart + RSI")
     ticker = st.selectbox("Select Leveraged Ticker", st.session_state.tickers, key="superchart_ticker")
-    
-    # Determine main ticker for overlay
     main_ticker = MAIN_TICKER_MAP.get(ticker, ticker)
-    
-    st.write(f"**Showing:** {ticker} (with volume) + **{main_ticker}** (overlay)")
 
-    # TradingView Advanced Chart Widget (Super Chart)
+    st.write(f"**Showing:** {ticker} (with Volume + RSI) + **{main_ticker}** (overlay)")
+
     tv_html = f"""
     <div class="tradingview-widget-container">
       <div id="tradingview_{ticker}"></div>
@@ -276,7 +287,7 @@ with tab4:  # Super Chart Tab - TradingView Widget
       new TradingView.widget(
       {{
         "width": "100%",
-        "height": 600,
+        "height": 650,
         "symbol": "{ticker}",
         "interval": "D",
         "timezone": "Etc/UTC",
@@ -287,22 +298,25 @@ with tab4:  # Super Chart Tab - TradingView Widget
         "enable_publishing": false,
         "allow_symbol_change": true,
         "container_id": "tradingview_{ticker}",
-        "studies": ["Volume@tv-basicstudies"],
+        "studies": ["Volume@tv-basicstudies", "RSI@tv-basicstudies"],
         "show_volume": true,
-        "overrides": {{
-          "mainSeriesProperties.showPriceLine": true
-        }},
+        "overrides": {{ "mainSeriesProperties.showPriceLine": true }},
         "comparisons": [{{"symbol": "{main_ticker}"}}]
       }}
       );
       </script>
     </div>
     """
-    st.components.v1.html(tv_html, height=650, scrolling=True)
+    st.components.v1.html(tv_html, height=680, scrolling=True)
 
 with tab5:  # Calendar
-    st.subheader("Event Calendar")
-    st.info("Avoid new trades on high VIX (≥25) or major events")
+    st.subheader("📅 Upcoming Economic Events")
+    events = get_upcoming_events()
+    for ev in events:
+        days_left = (datetime.strptime(ev["date"], "%Y-%m-%d") - datetime.now()).days
+        st.write(f"**{ev['date']}** — {ev['event']} ({days_left} days left)")
+        if days_left <= 3:
+            st.error("⚠️ HIGH IMPACT — NO NEW TRADES RECOMMENDED")
 
 with tab6:  # Settings
     st.subheader("⚙️ Settings")
@@ -315,8 +329,16 @@ with tab6:  # Settings
         st.success(f"Capital set to ${st.session_state.capital:,.0f}")
 
     st.divider()
-    st.write("**House Money** (realized profits)")
+    st.write("**House Money**")
     st.metric("Current House Money", f"${st.session_state.leap_fund:,.0f}")
+
+    st.divider()
+    st.write("**Journal Entries** (Closed Trades)")
+    if st.session_state.journal:
+        journal_df = pd.DataFrame(st.session_state.journal)
+        st.dataframe(journal_df, use_container_width=True)
+    else:
+        st.info("No closed trades yet.")
 
     st.divider()
     st.write("**Watched Tickers**")
@@ -347,7 +369,16 @@ with tab6:  # Settings
         else:
             st.warning("Already watching or empty input")
 
-# Global safe refresh
+# Auto-refresh every 15 minutes
+if 'last_refresh' not in st.session_state:
+    st.session_state.last_refresh = time.time()
+
+if time.time() - st.session_state.last_refresh > 900:  # 15 minutes
+    safe_batch_update(st.session_state.tickers)
+    st.session_state.last_refresh = time.time()
+    st.success("Auto-refreshed market data (15 min)")
+
+# Manual safe refresh
 if st.button("🔄 Safe Full Refresh (≤50 calls/min)"):
     safe_batch_update(st.session_state.tickers)
     st.success("Safe batch update completed")
