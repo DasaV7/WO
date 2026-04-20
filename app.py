@@ -7,13 +7,13 @@ from streamlit_lightweight_charts import renderLightweightCharts
 
 st.set_page_config(page_title="WheelOS • Options Radar", page_icon="◈", layout="wide")
 
-# Apple-style minimalist CSS
+# Apple minimalist light theme
 st.markdown("""
 <style>
     .main {background-color: #FAFAFA;}
     .block-container {padding-top: 2rem;}
     
-    /* Cards - soft, no sharp borders */
+    /* Soft cards - no sharp borders */
     .stCard, div[data-testid="stExpander"] {
         background-color: #FFFFFF;
         border-radius: 18px;
@@ -21,7 +21,7 @@ st.markdown("""
         border: 1px solid rgba(0,0,0,0.06);
     }
     
-    /* Gradient buttons with hover effects */
+    /* Gradient buttons with smooth effects */
     .stButton>button {
         background: linear-gradient(135deg, #0071E3, #4A9EFF);
         color: white;
@@ -37,14 +37,10 @@ st.markdown("""
         filter: brightness(1.08);
     }
     
-    /* Metrics */
     .metric-label {font-size:13px; font-weight:600; letter-spacing:0.8px; text-transform:uppercase; color:#86868B;}
     .green {color:#34C759;}
     .red {color:#FF3B30;}
     .gold {color:#FF9500;}
-    
-    /* Progress bars */
-    .stProgress > div > div > div {background: linear-gradient(90deg, #0071E3, #4A9EFF);}
 </style>
 """, unsafe_allow_html=True)
 
@@ -74,7 +70,7 @@ MAX_CALLS_PER_MIN = 50
 
 MAIN_TICKER_MAP = {"TQQQ": "QQQ", "SOXL": "SOXX", "TSLL": "TSLA", "QQQ": "QQQ", "SPY": "SPY"}
 
-# ==================== FINNHUB HELPERS (Safe) ====================
+# ==================== FINNHUB HELPERS ====================
 def fetch_quote(sym):
     if not st.session_state.finnhub_key: return None
     try:
@@ -309,11 +305,12 @@ with tab3:  # LEAP Trades
                 st.success("Half sold • Profits added to House Money")
                 st.rerun()
 
-with tab4:  # Super Chart
+with tab4:  # Super Chart with RSI
     st.subheader("TradingView Super Chart + RSI")
     ticker = st.selectbox("Select Leveraged Ticker", st.session_state.tickers, key="superchart_ticker")
     main_ticker = MAIN_TICKER_MAP.get(ticker, ticker)
-    st.write(f"**Showing:** {ticker} (Volume + RSI) + **{main_ticker}** (overlay)")
+
+    st.write(f"**Showing:** {ticker} (with Volume + RSI) + **{main_ticker}** (overlay)")
 
     tv_html = f"""
     <div class="tradingview-widget-container">
@@ -345,7 +342,6 @@ with tab4:  # Super Chart
 
 with tab5:  # Calendar
     st.subheader("📅 Upcoming Economic Events")
-    events = []  # You can expand this with real data later
     st.info("Avoid new trades on high VIX (≥25) or major events")
 
 with tab6:  # Settings
