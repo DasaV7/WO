@@ -3,7 +3,6 @@ import pandas as pd
 import requests
 import time
 from datetime import datetime, timedelta
-from streamlit_lightweight_charts import renderLightweightCharts
 
 st.set_page_config(page_title="WheelOS • Options Radar", page_icon="◈", layout="wide")
 
@@ -40,6 +39,15 @@ if 'capital' not in st.session_state:
 VIX_LIMIT = 25
 MOVE_PCT = 5
 MAX_CALLS_PER_MIN = 50
+
+# Main ticker mapping for overlay (e.g. TQQQ → QQQ)
+MAIN_TICKER_MAP = {
+    "TQQQ": "QQQ",
+    "SOXL": "SOXX",
+    "TSLL": "TSLA",
+    "QQQ": "QQQ",
+    "SPY": "SPY"
+}
 
 # ==================== FINNHUB HELPERS ====================
 def fetch_quote(sym):
@@ -101,7 +109,6 @@ def next_expiry(days=30):
     if len(fridays) >= 3: return fridays[2]
     return target + timedelta(days=30)
 
-# Safe batch update (≤50 calls/min)
 def safe_batch_update(tickers):
     updated = 0
     for sym in tickers:
@@ -145,9 +152,9 @@ with st.sidebar:
         st.rerun()
 
 # Tabs
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "🔁 CSP Trades", "🚀 LEAP Trades", "📈 Chart", "📅 Calendar", "⚙️ Settings"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "🔁 CSP Trades", "🚀 LEAP Trades", "📈 Super Chart", "📅 Calendar", "⚙️ Settings"])
 
-with tab1:  # Dashboard
+with tab1:  # Dashboard (unchanged from previous)
     st.subheader("Matt’s Profit Recycling Loop")
     st.info("CSP on red days → Close at 50% → 50% income, 50% to LEAP fund (house money only)")
     col1, col2, col3 = st.columns(3)
@@ -163,7 +170,7 @@ with tab1:  # Dashboard
     if st.session_state.market_data:
         st.dataframe(pd.DataFrame.from_dict(st.session_state.market_data, orient="index"), use_container_width=True)
 
-with tab2:  # CSP Trades
+with tab2:  # CSP Trades (unchanged logic, but with RV fallback)
     st.subheader("CSP Trades • Red Day Sell Put / Green Day Sell Call")
     for ticker in st.session_state.tickers:
         d = st.session_state.market_data.get(ticker, {})
@@ -175,27 +182,19 @@ with tab2:  # CSP Trades
 
         chg = d.get("change", 0)
         signal = "NO TRADE"
-        badge = "badge-notrade"
-        enable_put = False
-        enable_call = False
-
         if float(st.session_state.get("vix") or 0) >= VIX_LIMIT:
             signal = "NO TRADE (VIX HIGH)"
         elif chg <= -MOVE_PCT:
             signal = "SELL PUT (Red Day >5%)"
-            badge = "badge-put"
-            enable_put = True
         elif chg >= MOVE_PCT:
             signal = "SELL CALL (Green Day >5%)"
-            badge = "badge-call"
-            enable_call = True   # Even if RV is missing
 
         with st.expander(f"{ticker} — **{signal}**"):
             st.write(f"Price: **${price}** | Change: **{chg}%** | RV: **{rv if rv else 'Not loaded yet'}**")
             if not rv:
                 st.warning("RV data not loaded yet – trading based on price action only")
 
-            if enable_put:
+            if chg <= -MOVE_PCT:
                 if st.button("Log Sell Put", key=f"put_{ticker}"):
                     expiry = next_expiry()
                     opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
@@ -206,7 +205,7 @@ with tab2:  # CSP Trades
                     st.success("Sell Put logged")
                     st.rerun()
 
-            if enable_call:
+            if chg >= MOVE_PCT:
                 if st.button("Log Sell Call", key=f"call_{ticker}"):
                     expiry = next_expiry()
                     opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
@@ -230,7 +229,7 @@ with tab2:  # CSP Trades
                     st.success(f"Closed! ${profit} profit → ${profit*0.5:.0f} added to House Money")
                     st.rerun()
 
-with tab3:  # LEAP Trades
+with tab3:  # LEAP Trades (unchanged)
     st.subheader("LEAP Calls • House Money Only")
     st.metric("House Money Available", f"${st.session_state.leap_fund:,.0f}")
     leap_ticker = st.selectbox("LEAP Ticker", st.session_state.tickers, key="leap_sel")
@@ -259,26 +258,47 @@ with tab3:  # LEAP Trades
                 st.success("Half sold • Profits added to House Money")
                 st.rerun()
 
-with tab4:  # Chart
-    st.subheader("Interactive Candlestick Chart")
-    ticker = st.selectbox("Ticker", st.session_state.tickers, key="chart_ticker")
-    if st.button("Load Candles"):
-        df = fetch_candles(ticker)
-        if df is not None:
-            st.session_state.chart_data[ticker] = df
-            st.success(f"Loaded {len(df)} days")
-    if ticker in st.session_state.chart_data:
-        df = st.session_state.chart_data[ticker]
-        chart_data = []
-        for _, row in df.iterrows():
-            chart_data.append({
-                "time": row["time"],
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"])
-            })
-        renderLightweightCharts([{"series": [{"type": "candlestick", "data": chart_data}], "options": {"height": 420}}], key=f"lc_{ticker}")
+with tab4:  # Super Chart Tab - TradingView Widget
+    st.subheader("TradingView Super Chart")
+    ticker = st.selectbox("Select Leveraged Ticker", st.session_state.tickers, key="superchart_ticker")
+    
+    # Determine main ticker for overlay
+    main_ticker = MAIN_TICKER_MAP.get(ticker, ticker)
+    
+    st.write(f"**Showing:** {ticker} (with volume) + **{main_ticker}** (overlay)")
+
+    # TradingView Advanced Chart Widget (Super Chart)
+    tv_html = f"""
+    <div class="tradingview-widget-container">
+      <div id="tradingview_{ticker}"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+      new TradingView.widget(
+      {{
+        "width": "100%",
+        "height": 600,
+        "symbol": "{ticker}",
+        "interval": "D",
+        "timezone": "Etc/UTC",
+        "theme": "light",
+        "style": "1",
+        "locale": "en",
+        "toolbar_bg": "#f1f3f6",
+        "enable_publishing": false,
+        "allow_symbol_change": true,
+        "container_id": "tradingview_{ticker}",
+        "studies": ["Volume@tv-basicstudies"],
+        "show_volume": true,
+        "overrides": {{
+          "mainSeriesProperties.showPriceLine": true
+        }},
+        "comparisons": [{{"symbol": "{main_ticker}"}}]
+      }}
+      );
+      </script>
+    </div>
+    """
+    st.components.v1.html(tv_html, height=650, scrolling=True)
 
 with tab5:  # Calendar
     st.subheader("Event Calendar")
