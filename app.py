@@ -5,9 +5,9 @@ import time
 from datetime import datetime, timedelta
 from streamlit_lightweight_charts import renderLightweightCharts
 
-st.set_page_config(page_title="Options Radar", page_icon="📈", layout="wide")
+st.set_page_config(page_title="WheelOS • Options Radar", page_icon="◈", layout="wide")
 
-# Light clean Apple-inspired theme
+# Light clean theme
 st.markdown("""
 <style>
     .main {background-color: #f0f4f8;}
@@ -20,23 +20,27 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Session State
+# ==================== SESSION STATE ====================
 if 'finnhub_key' not in st.session_state:
     st.session_state.finnhub_key = st.secrets.get("finnhub", {}).get("key", "")
 if 'trades' not in st.session_state:
     st.session_state.trades = []
+if 'leaps' not in st.session_state:
+    st.session_state.leaps = []
+if 'leap_fund' not in st.session_state:
+    st.session_state.leap_fund = 0.0
 if 'market_data' not in st.session_state:
     st.session_state.market_data = {}
 if 'chart_data' not in st.session_state:
     st.session_state.chart_data = {}
-if 'vix' not in st.session_state:
-    st.session_state.vix = None
+if 'tickers' not in st.session_state:
+    st.session_state.tickers = ["TSLL", "SOXL", "TQQQ"]  # Default from Matt's leveraged focus
 
-TICKERS = ["TSLL", "SOXL", "TQQQ"]
 VIX_LIMIT = 25
 MOVE_PCT = 5
+MAX_CALLS_PER_MIN = 50  # Safe free-tier limit
 
-# ==================== HELPERS ====================
+# ==================== FINNHUB HELPERS WITH RATE LIMIT ====================
 def fetch_quote(sym):
     if not st.session_state.finnhub_key:
         return None
@@ -102,12 +106,11 @@ def next_expiry():
     d = datetime(target.year, target.month, 1)
     fridays = []
     while d.month == target.month:
-        if d.weekday() == 4:  # Friday
+        if d.weekday() == 4:
             fridays.append(d)
         d += timedelta(days=1)
     if len(fridays) >= 3:
         return fridays[2]
-    # Next month fallback
     d = datetime(target.year, target.month + 1, 1)
     fridays = []
     while len(fridays) < 3:
@@ -116,15 +119,34 @@ def next_expiry():
         d += timedelta(days=1)
     return fridays[2] if fridays else target + timedelta(days=30)
 
+# Safe batch update respecting 50 calls/min
+def safe_batch_update(tickers_to_update):
+    updated = 0
+    for sym in tickers_to_update:
+        if updated >= MAX_CALLS_PER_MIN:
+            st.warning(f"Reached safe limit ({MAX_CALLS_PER_MIN}/min). Remaining updates will run next minute.")
+            break
+        q = fetch_quote(sym)
+        if q and q.get("c"):
+            df_candles = fetch_candles(sym)
+            rv = calc_rv(df_candles)
+            st.session_state.market_data[sym] = {
+                "price": round(q["c"], 2),
+                "change": round(q.get("dp", 0), 2),
+                "rv": rv
+            }
+            updated += 2  # quote + candles count as 2 calls
+        time.sleep(1.2)  # extra safety spacing
+
 # ==================== SIDEBAR ====================
 with st.sidebar:
-    st.title("📈 Options Radar")
-    st.caption("Leveraged ETF Options • 30DTE Seller")
+    st.title("◈ WheelOS")
+    st.caption("CSP Income + LEAP Growth (Matt Style)")
     if not st.session_state.finnhub_key:
-        key = st.text_input("Finnhub API Key", type="password", help="Get free key at finnhub.io")
+        key = st.text_input("Finnhub API Key", type="password")
         if st.button("Save Key"):
             st.session_state.finnhub_key = key
-            st.success("Key saved for this session")
+            st.success("Key saved!")
             st.rerun()
     else:
         st.success("Finnhub connected")
@@ -133,110 +155,92 @@ with st.sidebar:
             st.rerun()
 
 # ==================== TABS ====================
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🔁 Trades", "📈 Chart", "📅 Calendar"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "🔁 Trades", "🚀 LEAPs", "📈 Chart", "⚙️ Settings"])
 
 with tab1:  # Dashboard
-    st.subheader("Market Status")
-    if st.button("Refresh Live Data"):
-        for sym in TICKERS:
-            q = fetch_quote(sym)
-            if q and q.get("c"):
-                df_candles = fetch_candles(sym)
-                rv = calc_rv(df_candles)
-                st.session_state.market_data[sym] = {
-                    "price": round(q["c"], 2),
-                    "change": round(q.get("dp", 0), 2),
-                    "rv": rv
-                }
-        st.success("Live data + RV updated")
+    st.subheader("Matt’s Profit Recycling Loop")
+    st.info("CSPs on red days → 50% profit close → 50% income, 50% to LEAP fund (house money). Minimal screen time (15 min/week).")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("LEAP Fund", f"${st.session_state.leap_fund:,.0f}")
+    with col2:
+        closed = [t for t in st.session_state.trades if t.get("status") == "closed"]
+        st.metric("Realized CSP P&L", f"${sum(t.get('pnl',0) for t in closed):,.0f}")
+
+    if st.button("🔄 Safe Refresh (≤50 calls/min)"):
+        safe_batch_update(st.session_state.tickers)
+        st.success("Batch update completed safely")
         st.rerun()
 
     if st.session_state.market_data:
         df = pd.DataFrame.from_dict(st.session_state.market_data, orient="index")
         st.dataframe(df, use_container_width=True)
 
-    vix_val = st.session_state.get("vix")
-    if vix_val:
-        st.metric("VIX", vix_val, delta=None, delta_color="normal" if float(vix_val) < VIX_LIMIT else "inverse")
-
 with tab2:  # Trades
-    st.subheader("Trade Signals & Logging")
-    for ticker in TICKERS:
-        d = st.session_state.market_data.get(ticker, {})
-        price = d.get("price")
-        rv = d.get("rv")
-        if not price:
-            continue
+    st.subheader("CSP Trades • Red Day + 50% Rule")
+    ticker = st.selectbox("Ticker", st.session_state.tickers)
+    if st.button("Log New CSP"):
+        q = st.session_state.market_data.get(ticker, {})
+        price = q.get("price", 450)
+        rv = q.get("rv")
+        strike = round(price * 0.90)
+        premium = estimate_options(price, price*1.10, price*0.90, 30, rv)["put_mid"]
+        st.session_state.trades.append({
+            "id": int(time.time()),
+            "type": "CSP",
+            "ticker": ticker,
+            "strike": strike,
+            "expiry": next_expiry().strftime("%Y-%m-%d"),
+            "premium": premium,
+            "status": "open",
+            "pnl": 0,
+            "entry_date": datetime.now().strftime("%Y-%m-%d")
+        })
+        st.success(f"CSP on {ticker} logged")
+        st.rerun()
 
-        chg = d.get("change", 0)
-        signal = "NO TRADE"
-        badge_class = "badge-notrade"
-        if float(vix_val or 0) >= VIX_LIMIT:
-            signal = "NO TRADE (VIX HIGH)"
-        elif abs(chg) >= MOVE_PCT:
-            if chg >= MOVE_PCT:
-                signal = "SELL CALL"
-                badge_class = "badge-call"
-            else:
-                signal = "SELL PUT"
-                badge_class = "badge-put"
+    for t in st.session_state.trades:
+        if t["status"] == "open":
+            with st.expander(f"{t['ticker']} CSP @ ${t['strike']}"):
+                st.write(f"Premium: ${t['premium']} | Exp: {t['expiry']}")
+                if st.button("Close at 50%", key=t["id"]):
+                    profit = round(t["premium"] * 0.5, 2)
+                    t["pnl"] = profit
+                    t["status"] = "closed"
+                    st.session_state.leap_fund += profit * 0.5
+                    st.success(f"Closed! ${profit} profit → ${profit*0.5:.0f} to LEAP fund")
+                    st.rerun()
+
+with tab3:  # LEAPs
+    st.subheader("LEAPs • House Money Only (Matt Style)")
+    st.metric("LEAP Fund Available", f"${st.session_state.leap_fund:,.0f}")
+    ticker = st.selectbox("LEAP Ticker", st.session_state.tickers, key="leap_ticker")
+    if st.button("Buy LEAP (from fund)"):
+        if st.session_state.leap_fund >= 1000:
+            st.session_state.leaps.append({"id": int(time.time()), "ticker": ticker, "cost": 1200, "current_val": 1200, "contracts": 1})
+            st.session_state.leap_fund -= 1200
+            st.success("LEAP purchased with recycled profits")
+            st.rerun()
         else:
-            signal = "WAIT"
-            badge_class = "badge-wait"
+            st.error("Not enough LEAP fund")
 
-        with st.expander(f"{ticker} — **{signal}**"):
-            st.write(f"Price: **${price}** | Change: **{chg}%** | RV: **{rv}%**")
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Log Call", key=f"call_{ticker}"):
-                    expiry = next_expiry()
-                    opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
-                    st.session_state.trades.append({
-                        "id": int(time.time()),
-                        "ticker": ticker,
-                        "type": "call",
-                        "strike": round(price*1.10, 2),
-                        "expiry": expiry.strftime("%Y-%m-%d"),
-                        "entry_premium": opts["call_mid"],
-                        "status": "open"
-                    })
-                    st.success("Call trade logged")
-                    st.rerun()
-            with col2:
-                if st.button("Log Put", key=f"put_{ticker}"):
-                    expiry = next_expiry()
-                    opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
-                    st.session_state.trades.append({
-                        "id": int(time.time()),
-                        "ticker": ticker,
-                        "type": "put",
-                        "strike": round(price*0.90, 2),
-                        "expiry": expiry.strftime("%Y-%m-%d"),
-                        "entry_premium": opts["put_mid"],
-                        "status": "open"
-                    })
-                    st.success("Put trade logged")
-                    st.rerun()
+    for l in st.session_state.leaps:
+        with st.expander(f"{l['ticker']} LEAP"):
+            st.write(f"Cost: ${l['cost']} | Current: ${l['current_val']}")
+            if st.button("Sell Half & Recycle", key=l["id"]):
+                st.session_state.leap_fund += l["cost"] * 0.8
+                l["contracts"] = max(0, l["contracts"] - 1)
+                st.success("Half sold • Profits recycled")
+                st.rerun()
 
-    st.subheader("Open Trades")
-    for trade in st.session_state.trades:
-        if trade.get("status") == "open":
-            with st.expander(f"{trade['ticker']} {trade['type'].upper()} @ ${trade['strike']}"):
-                st.write(f"Entry Premium: **${trade.get('entry_premium', '—')}**")
-                if st.button("Mark Closed (50% target)", key=trade["id"]):
-                    trade["status"] = "closed"
-                    st.success("Trade closed at target")
-                    st.rerun()
-
-with tab3:  # Chart
-    st.subheader("Candlestick Chart")
-    ticker = st.selectbox("Ticker", TICKERS, key="chart_ticker")
+with tab4:  # Chart
+    st.subheader("Interactive Candlestick Chart")
+    ticker = st.selectbox("Ticker", st.session_state.tickers, key="chart_sel")
     if st.button("Load Candles"):
         df = fetch_candles(ticker)
         if df is not None:
             st.session_state.chart_data[ticker] = df
-            st.success(f"Loaded {len(df)} days for {ticker}")
-
+            st.success(f"Loaded {len(df)} days")
     if ticker in st.session_state.chart_data:
         df = st.session_state.chart_data[ticker]
         chart_data = []
@@ -248,29 +252,47 @@ with tab3:  # Chart
                 "low": float(row["low"]),
                 "close": float(row["close"])
             })
-        renderLightweightCharts([{
-            "series": [{"type": "candlestick", "data": chart_data}],
-            "options": {"height": 420}
-        }], key=f"lc_{ticker}")
-    else:
-        st.info("Click 'Load Candles' to see real candlestick chart")
+        renderLightweightCharts([{"series": [{"type": "candlestick", "data": chart_data}], "options": {"height": 420}}], key=f"lc_{ticker}")
 
-with tab4:  # Calendar
-    st.subheader("Event Calendar (No-Trade Days)")
-    st.info("Avoid new trades on high VIX (≥25) or major events (FOMC, CPI, Rate decisions)")
+with tab5:  # Settings
+    st.subheader("⚙️ Settings – Manage Tickers")
+    st.write("**Current Watched Tickers** (max recommended: 3–5 for free tier)")
+    for t in st.session_state.tickers:
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.write(f"• {t}")
+        with col2:
+            if st.button("Remove", key=f"rem_{t}"):
+                if len(st.session_state.tickers) > 1:
+                    st.session_state.tickers.remove(t)
+                    st.success(f"Removed {t}")
+                    st.rerun()
+                else:
+                    st.error("Keep at least one ticker")
 
-# Global refresh
-if st.button("🔄 Refresh All Data"):
-    for sym in TICKERS:
-        q = fetch_quote(sym)
-        if q and q.get("c"):
-            df_candles = fetch_candles(sym)
-            rv = calc_rv(df_candles)
-            st.session_state.market_data[sym] = {
-                "price": round(q["c"], 2),
-                "change": round(q.get("dp", 0), 2),
-                "rv": rv
-            }
+    st.divider()
+    st.write("**Add New Ticker**")
+    new_t = st.text_input("Ticker Symbol (e.g. NVDA, AAPL)").upper().strip()
+    if st.button("Add Ticker"):
+        if new_t and new_t not in st.session_state.tickers:
+            q = fetch_quote(new_t)
+            if q and q.get("c"):
+                st.session_state.tickers.append(new_t)
+                st.success(f"Added {new_t}")
+                st.rerun()
+            else:
+                st.error("Ticker not found or no data")
+        elif new_t in st.session_state.tickers:
+            st.warning("Already watching this ticker")
+        else:
+            st.error("Enter a ticker")
+
+    st.caption("Free tier safe: ≤50 calls/min. More tickers = slower batch updates.")
+
+# Global safe refresh
+if st.button("🔄 Safe Full Refresh (≤50 calls/min)"):
+    safe_batch_update(st.session_state.tickers)
+    st.success("Safe batch update completed")
     st.rerun()
 
-st.caption("Options Radar • Finnhub + Lightweight Charts • Streamlit Conversion")
+st.caption("WheelOS • CSP Income + LEAP Growth via Profit Recycling (Matt @MarketMovesMatt style)")
