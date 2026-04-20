@@ -7,7 +7,7 @@ from streamlit_lightweight_charts import renderLightweightCharts
 
 st.set_page_config(page_title="WheelOS • Options Radar", page_icon="◈", layout="wide")
 
-# Light Apple-style theme
+# Light clean theme
 st.markdown("""
 <style>
     .main {background-color: #f0f4f8;}
@@ -22,11 +22,11 @@ st.markdown("""
 # ==================== SESSION STATE ====================
 if 'finnhub_key' not in st.session_state:
     st.session_state.finnhub_key = st.secrets.get("finnhub", {}).get("key", "")
-if 'trades' not in st.session_state:          # CSP + Sell Call trades
+if 'trades' not in st.session_state:
     st.session_state.trades = []
 if 'leaps' not in st.session_state:
     st.session_state.leaps = []
-if 'leap_fund' not in st.session_state:       # House money
+if 'leap_fund' not in st.session_state:
     st.session_state.leap_fund = 0.0
 if 'market_data' not in st.session_state:
     st.session_state.market_data = {}
@@ -41,7 +41,7 @@ VIX_LIMIT = 25
 MOVE_PCT = 5
 MAX_CALLS_PER_MIN = 50
 
-# ==================== FINNHUB HELPERS (Rate-limited) ====================
+# ==================== FINNHUB HELPERS (Safe Rate Limit) ====================
 def fetch_quote(sym):
     if not st.session_state.finnhub_key: return None
     try:
@@ -59,7 +59,7 @@ def fetch_candles(sym):
         if data.get("s") == "ok":
             return pd.DataFrame({
                 "time": pd.to_datetime(data["t"], unit="s").dt.strftime("%Y-%m-%d"),
-                "open": data["o"], "high": data["h"], "low": data["l"], "close": data["c"], "volume": data["v"]
+                "open": data["o"], "high": data["h"], "low": data["l"], "close": data["c"]
             })
     except: pass
     return None
@@ -81,9 +81,14 @@ def estimate_options(price, strike_call, strike_put, dte, rv):
     put_mid = max(0.01, atm_prem * put_otm)
     spread = max(0.02, call_mid * 0.12)
     return {
-        "call_mid": round(call_mid, 2), "call_bid": round(call_mid - spread/2, 2), "call_ask": round(call_mid + spread/2, 2),
-        "put_mid": round(put_mid, 2), "put_bid": round(put_mid - spread/2, 2), "put_ask": round(put_mid + spread/2, 2),
-        "call_pct": round((call_mid / price) * 100, 1), "put_pct": round((put_mid / price) * 100, 1)
+        "call_mid": round(call_mid, 2),
+        "call_bid": round(call_mid - spread/2, 2),
+        "call_ask": round(call_mid + spread/2, 2),
+        "put_mid": round(put_mid, 2),
+        "put_bid": round(put_mid - spread/2, 2),
+        "put_ask": round(put_mid + spread/2, 2),
+        "call_pct": round((call_mid / price) * 100, 1),
+        "put_pct": round((put_mid / price) * 100, 1)
     }
 
 def next_expiry(days=30):
@@ -96,35 +101,64 @@ def next_expiry(days=30):
     if len(fridays) >= 3: return fridays[2]
     return target + timedelta(days=30)
 
-# Safe batch update (≤50 calls/min)
+# Safe batch update respecting free tier limit
 def safe_batch_update(tickers):
     updated = 0
     for sym in tickers:
         if updated >= MAX_CALLS_PER_MIN:
-            st.warning(f"Reached safe limit ({MAX_CALLS_PER_MIN}/min). Remaining tickers will update next minute.")
+            st.warning(f"Reached safe limit ({MAX_CALLS_PER_MIN}/min). Remaining updates will run next minute.")
             break
         q = fetch_quote(sym)
         if q and q.get("c"):
             df = fetch_candles(sym)
             rv = calc_rv(df)
-            st.session_state.market_data[sym] = {"price": round(q["c"],2), "change": round(q.get("dp",0),2), "rv": rv}
+            st.session_state.market_data[sym] = {
+                "price": round(q["c"], 2),
+                "change": round(q.get("dp", 0), 2),
+                "rv": rv
+            }
             updated += 2
         time.sleep(1.2)
 
-# ==================== TABS ====================
+# ==================== MAIN LAYOUT ====================
+if not st.session_state.finnhub_key:
+    # Full-screen setup when no key
+    st.title("Welcome to WheelOS")
+    st.markdown("### Setup Finnhub API Key (Free)")
+    st.info("Get your free key at [finnhub.io](https://finnhub.io) → Dashboard → API Key")
+    
+    key = st.text_input("Paste your Finnhub API Key", type="password")
+    if st.button("Save & Launch App", type="primary"):
+        if key.strip():
+            st.session_state.finnhub_key = key.strip()
+            st.success("Key saved! Loading app...")
+            st.rerun()
+        else:
+            st.error("Please enter a valid key")
+    st.stop()  # Stop execution until key is set
+
+# Sidebar (visible after key is set)
+with st.sidebar:
+    st.title("◈ WheelOS")
+    st.success("Finnhub connected")
+    if st.button("Reset Finnhub Key"):
+        st.session_state.finnhub_key = ""
+        st.rerun()
+
+# Tabs
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "🔁 CSP Trades", "🚀 LEAP Trades", "📈 Chart", "📅 Calendar", "⚙️ Settings"])
 
 with tab1:  # Dashboard
     st.subheader("Matt’s Profit Recycling Loop")
-    st.info("CSP on red days → 50% profit close → 50% income, 50% to LEAP fund (house money only)")
+    st.info("CSP on red days → Close at 50% → 50% income, 50% to LEAP fund (house money only)")
     col1, col2, col3 = st.columns(3)
-    with col1: st.metric("House Money (LEAP Fund)", f"${st.session_state.leap_fund:,.0f}")
+    with col1: st.metric("House Money", f"${st.session_state.leap_fund:,.0f}")
     with col2: st.metric("Investment Capital", f"${st.session_state.capital:,.0f}")
     with col3: st.metric("Open CSPs", len([t for t in st.session_state.trades if t.get("status") == "open"]))
 
     if st.button("🔄 Safe Refresh (≤50 calls/min)"):
         safe_batch_update(st.session_state.tickers)
-        st.success("Batch update completed")
+        st.success("Batch update completed safely")
         st.rerun()
 
     if st.session_state.market_data:
@@ -140,24 +174,16 @@ with tab2:  # CSP Trades
 
         chg = d.get("change", 0)
         signal = "NO TRADE"
-        badge = "badge-notrade"
-        enable_put = False
-        enable_call = False
-
         if float(st.session_state.get("vix") or 0) >= VIX_LIMIT:
             signal = "NO TRADE (VIX HIGH)"
         elif chg <= -MOVE_PCT:
-            signal = "SELL PUT (Red Day)"
-            badge = "badge-put"
-            enable_put = True
+            signal = "SELL PUT (Red Day >5%)"
         elif chg >= MOVE_PCT and rv and rv > 100:
             signal = "SELL CALL (Green Day)"
-            badge = "badge-call"
-            enable_call = True
 
         with st.expander(f"{ticker} — **{signal}**"):
             st.write(f"Price: **${price}** | Change: **{chg}%** | RV: **{rv}%**")
-            if enable_put:
+            if chg <= -MOVE_PCT:
                 if st.button("Log Sell Put", key=f"put_{ticker}"):
                     expiry = next_expiry()
                     opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
@@ -167,7 +193,7 @@ with tab2:  # CSP Trades
                     })
                     st.success("Sell Put logged")
                     st.rerun()
-            if enable_call:
+            if chg >= MOVE_PCT and rv and rv > 100:
                 if st.button("Log Sell Call", key=f"call_{ticker}"):
                     expiry = next_expiry()
                     opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
@@ -232,12 +258,18 @@ with tab4:  # Chart
         df = st.session_state.chart_data[ticker]
         chart_data = []
         for _, row in df.iterrows():
-            chart_data.append({"time": row["time"], "open": float(row["open"]), "high": float(row["high"]), "low": float(row["low"]), "close": float(row["close"])})
+            chart_data.append({
+                "time": row["time"],
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"])
+            })
         renderLightweightCharts([{"series": [{"type": "candlestick", "data": chart_data}], "options": {"height": 420}}], key=f"lc_{ticker}")
 
-with tab5:  # Calendar (placeholder – you can expand)
+with tab5:  # Calendar
     st.subheader("Event Calendar")
-    st.info("Avoid new trades on high VIX or major events")
+    st.info("Avoid new trades on high VIX (≥25) or major events")
 
 with tab6:  # Settings
     st.subheader("⚙️ Settings")
@@ -250,7 +282,7 @@ with tab6:  # Settings
         st.success(f"Capital set to ${st.session_state.capital:,.0f}")
 
     st.divider()
-    st.write("**House Money** (realized profits)")
+    st.write("**House Money** (realized profits from CSP & LEAP)")
     st.metric("Current House Money", f"${st.session_state.leap_fund:,.0f}")
 
     st.divider()
@@ -270,7 +302,7 @@ with tab6:  # Settings
     st.divider()
     st.write("**Add New Ticker**")
     new_t = st.text_input("Ticker Symbol").upper().strip()
-    if st.button("Add"):
+    if st.button("Add Ticker"):
         if new_t and new_t not in st.session_state.tickers:
             q = fetch_quote(new_t)
             if q and q.get("c"):
@@ -278,8 +310,14 @@ with tab6:  # Settings
                 st.success(f"Added {new_t}")
                 st.rerun()
             else:
-                st.error("Ticker not found")
+                st.error("Ticker not found or no data")
         else:
-            st.warning("Already watching or empty")
+            st.warning("Already watching or empty input")
 
-st.caption("WheelOS • Matt @MarketMovesMatt Strategy • CSP Income + LEAP Growth via Profit Recycling")
+# Global safe refresh
+if st.button("🔄 Safe Full Refresh (≤50 calls/min)"):
+    safe_batch_update(st.session_state.tickers)
+    st.success("Safe batch update completed")
+    st.rerun()
+
+st.caption("WheelOS • Matt @MarketMovesMatt Strategy • CSP Income + LEAP Growth")
