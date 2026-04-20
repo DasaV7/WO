@@ -9,34 +9,7 @@ st.set_page_config(page_title="WheelOS • Options Radar", page_icon="◈", layo
 
 # Apple minimalist light theme
 st.markdown("""
-<style>
-    .main {background-color: #FAFAFA;}
-    .block-container {padding-top: 2rem;}
-    
-    /* Soft cards */
-    .stCard, div[data-testid="stExpander"] {
-        background-color: #FFFFFF;
-        border-radius: 18px;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.04);
-        border: 1px solid rgba(0,0,0,0.06);
-    }
-    
-    /* Gradient buttons with hover */
-    .stButton>button {
-        border-radius: 9999px;
-        font-weight: 700;
-        border: none;
-        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-        box-shadow: 0 4px 14px rgba(0,113,227,0.3);
-    }
-    .stButton>button:hover {
-        transform: scale(1.03);
-        box-shadow: 0 8px 20px rgba(0,113,227,0.35);
-        filter: brightness(1.08);
-    }
-    
-    .metric-label {font-size:13px; font-weight:600; letter-spacing:0.8px; text-transform:uppercase; color:#86868B;}
-</style>
+
 """, unsafe_allow_html=True)
 
 # ==================== SESSION STATE ====================
@@ -205,21 +178,16 @@ with tab2:  # CSP Trades - Color-coded buttons
 
         chg = d.get("change", 0)
         signal = "NO TRADE"
-        button_color = "gray"
-        enable_put = False
-        enable_call = False
+        button_type = "secondary"   # default gray
 
         if float(st.session_state.get("vix") or 0) >= VIX_LIMIT:
             signal = "NO TRADE (VIX HIGH)"
-            button_color = "gray"
         elif chg <= -MOVE_PCT:
             signal = "SELL PUT (Red Day >5%)"
-            button_color = "red"
-            enable_put = True
+            button_type = "primary"   # red tone via custom CSS if needed
         elif chg >= MOVE_PCT:
             signal = "SELL CALL (Green Day >5%)"
-            button_color = "green"
-            enable_call = True
+            button_type = "primary"
 
         with st.expander(f"{ticker} — **{signal}**"):
             st.write(f"Price: **${price}** | Change: **{chg}%** | RV: **{rv if rv else 'Not loaded yet'}**")
@@ -228,8 +196,8 @@ with tab2:  # CSP Trades - Color-coded buttons
 
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
-                if enable_put:
-                    if st.button("Log Sell Put", key=f"put_{ticker}", type="secondary" if button_color == "gray" else "primary"):
+                if chg <= -MOVE_PCT:
+                    if st.button(f"Log Sell Put on {ticker}", key=f"put_{ticker}", type=button_type):
                         expiry = next_expiry()
                         opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
                         st.session_state.trades.append({
@@ -239,11 +207,11 @@ with tab2:  # CSP Trades - Color-coded buttons
                         st.success("Sell Put logged")
                         st.rerun()
                 else:
-                    st.button("Log Sell Put", disabled=True)
+                    st.button(f"Log Sell Put on {ticker}", disabled=True, key=f"put_disabled_{ticker}")
 
             with col_btn2:
-                if enable_call:
-                    if st.button("Log Sell Call", key=f"call_{ticker}", type="secondary" if button_color == "gray" else "primary"):
+                if chg >= MOVE_PCT:
+                    if st.button(f"Log Sell Call on {ticker}", key=f"call_{ticker}", type=button_type):
                         expiry = next_expiry()
                         opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
                         st.session_state.trades.append({
@@ -253,7 +221,7 @@ with tab2:  # CSP Trades - Color-coded buttons
                         st.success("Sell Call logged")
                         st.rerun()
                 else:
-                    st.button("Log Sell Call", disabled=True)
+                    st.button(f"Log Sell Call on {ticker}", disabled=True, key=f"call_disabled_{ticker}")
 
     st.subheader("Open CSP Trades")
     for t in st.session_state.trades:
@@ -315,38 +283,20 @@ with tab4:  # Super Chart
     st.write(f"**Showing:** {ticker} (with Volume + RSI) + **{main_ticker}** (overlay)")
 
     tv_html = f"""
-    <div class="tradingview-widget-container">
-      <div id="tradingview_{ticker}"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-      <script type="text/javascript">
-      new TradingView.widget({{
-        "width": "100%",
-        "height": 650,
-        "symbol": "{ticker}",
-        "interval": "D",
-        "timezone": "Etc/UTC",
-        "theme": "light",
-        "style": "1",
-        "locale": "en",
-        "toolbar_bg": "#f1f3f6",
-        "enable_publishing": false,
-        "allow_symbol_change": true,
-        "container_id": "tradingview_{ticker}",
-        "studies": ["Volume@tv-basicstudies", "RSI@tv-basicstudies"],
-        "show_volume": true,
-        "overrides": {{ "mainSeriesProperties.showPriceLine": true }},
-        "comparisons": [{{"symbol": "{main_ticker}"}}]
-      }});
-      </script>
-    </div>
+    
+      
+
+      
+      
+    
     """
     st.components.v1.html(tv_html, height=680, scrolling=True)
 
-with tab5:  # Calendar
+with tab5:
     st.subheader("📅 Upcoming Economic Events")
     st.info("Avoid new trades on high VIX (≥25) or major events")
 
-with tab6:  # Settings
+with tab6:
     st.subheader("⚙️ Settings")
     st.write("**Investment Capital**")
     capital_options = [10000, 20000, 30000, 50000, 100000]
