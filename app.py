@@ -41,7 +41,7 @@ VIX_LIMIT = 25
 MOVE_PCT = 5
 MAX_CALLS_PER_MIN = 50
 
-# ==================== FINNHUB HELPERS (Safe Rate Limit) ====================
+# ==================== FINNHUB HELPERS ====================
 def fetch_quote(sym):
     if not st.session_state.finnhub_key: return None
     try:
@@ -101,7 +101,7 @@ def next_expiry(days=30):
     if len(fridays) >= 3: return fridays[2]
     return target + timedelta(days=30)
 
-# Safe batch update respecting free tier limit
+# Safe batch update (≤50 calls/min)
 def safe_batch_update(tickers):
     updated = 0
     for sym in tickers:
@@ -120,12 +120,11 @@ def safe_batch_update(tickers):
             updated += 2
         time.sleep(1.2)
 
-# ==================== MAIN LAYOUT ====================
+# ==================== FULL SCREEN SETUP ====================
 if not st.session_state.finnhub_key:
-    # Full-screen setup when no key
     st.title("Welcome to WheelOS")
-    st.markdown("### Setup Finnhub API Key (Free)")
-    st.info("Get your free key at [finnhub.io](https://finnhub.io) → Dashboard → API Key")
+    st.markdown("### First Time Setup")
+    st.info("Get your free Finnhub API key at [finnhub.io](https://finnhub.io) → Dashboard → API Key")
     
     key = st.text_input("Paste your Finnhub API Key", type="password")
     if st.button("Save & Launch App", type="primary"):
@@ -135,9 +134,9 @@ if not st.session_state.finnhub_key:
             st.rerun()
         else:
             st.error("Please enter a valid key")
-    st.stop()  # Stop execution until key is set
+    st.stop()
 
-# Sidebar (visible after key is set)
+# Sidebar
 with st.sidebar:
     st.title("◈ WheelOS")
     st.success("Finnhub connected")
@@ -170,20 +169,33 @@ with tab2:  # CSP Trades
         d = st.session_state.market_data.get(ticker, {})
         price = d.get("price")
         rv = d.get("rv")
-        if not price: continue
+        if not price: 
+            st.write(f"Waiting for data on {ticker}...")
+            continue
 
         chg = d.get("change", 0)
         signal = "NO TRADE"
+        badge = "badge-notrade"
+        enable_put = False
+        enable_call = False
+
         if float(st.session_state.get("vix") or 0) >= VIX_LIMIT:
             signal = "NO TRADE (VIX HIGH)"
         elif chg <= -MOVE_PCT:
             signal = "SELL PUT (Red Day >5%)"
-        elif chg >= MOVE_PCT and rv and rv > 100:
-            signal = "SELL CALL (Green Day)"
+            badge = "badge-put"
+            enable_put = True
+        elif chg >= MOVE_PCT:
+            signal = "SELL CALL (Green Day >5%)"
+            badge = "badge-call"
+            enable_call = True   # Even if RV is missing
 
         with st.expander(f"{ticker} — **{signal}**"):
-            st.write(f"Price: **${price}** | Change: **{chg}%** | RV: **{rv}%**")
-            if chg <= -MOVE_PCT:
+            st.write(f"Price: **${price}** | Change: **{chg}%** | RV: **{rv if rv else 'Not loaded yet'}**")
+            if not rv:
+                st.warning("RV data not loaded yet – trading based on price action only")
+
+            if enable_put:
                 if st.button("Log Sell Put", key=f"put_{ticker}"):
                     expiry = next_expiry()
                     opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
@@ -193,7 +205,8 @@ with tab2:  # CSP Trades
                     })
                     st.success("Sell Put logged")
                     st.rerun()
-            if chg >= MOVE_PCT and rv and rv > 100:
+
+            if enable_call:
                 if st.button("Log Sell Call", key=f"call_{ticker}"):
                     expiry = next_expiry()
                     opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
@@ -282,7 +295,7 @@ with tab6:  # Settings
         st.success(f"Capital set to ${st.session_state.capital:,.0f}")
 
     st.divider()
-    st.write("**House Money** (realized profits from CSP & LEAP)")
+    st.write("**House Money** (realized profits)")
     st.metric("Current House Money", f"${st.session_state.leap_fund:,.0f}")
 
     st.divider()
