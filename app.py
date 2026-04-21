@@ -12,6 +12,9 @@ st.markdown("""
     <style>
         .stApp { background-color: #f8f9fa; }
         .metric-label { font-size: 0.9rem; color: #555; }
+        .red-day { background-color: #ffebee; border-left: 5px solid #d32f2f; }
+        .green-day { background-color: #e8f5e9; border-left: 5px solid #2e7d32; }
+        .no-trade { background-color: #f5f5f5; border-left: 5px solid #9e9e9e; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -42,7 +45,7 @@ def save_persistent_data():
     with open(DATA_FILE, "w") as f:
         json.dump(data, f)
 
-# Load API Key from file
+# Load API Key
 if 'finnhub_key' not in st.session_state:
     st.session_state.finnhub_key = st.secrets.get("finnhub", {}).get("key", "")
     if not st.session_state.finnhub_key and KEY_FILE.exists():
@@ -71,7 +74,7 @@ GREEN_THRESHOLD = 5.0
 VIX_LIMIT = 25
 MAX_CALLS_PER_MIN = 50
 
-# Finnhub Helpers
+# Finnhub Helpers (same as before)
 def fetch_quote(sym):
     if not st.session_state.finnhub_key: return None
     try:
@@ -221,7 +224,7 @@ with tab2:
         has_held = any(h['ticker'] == ticker for h in st.session_state.held_shares)
 
         signal = "NO TRADE"
-        color_style = "color: gray;"
+        css_class = "no-trade"
         button_type = "secondary"
         is_put = True
 
@@ -231,19 +234,19 @@ with tab2:
             signal = "NO TRADE (RSI >60 or Low IV)"
         elif chg <= RED_THRESHOLD:
             signal = f"SELL CSP PUT (Red Day {chg:.1f}%)"
-            color_style = "color: #d32f2f;"
+            css_class = "red-day"
             button_type = "primary"
             is_put = True
         elif chg >= GREEN_THRESHOLD and has_held:
             signal = f"SELL COVERED CALL (Green Day {chg:.1f}%)"
-            color_style = "color: #2e7d32;"
+            css_class = "green-day"
             button_type = "primary"
             is_put = False
 
-        with st.expander(f"{ticker} — **{signal}**"):
-            st.markdown(f"<h4 style='{color_style}'>{signal}</h4>", unsafe_allow_html=True)
+        with st.expander(f"{ticker} — **{signal}**", expanded=False):
+            st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
+            st.markdown(f"<h4 style='margin:0'>{signal}</h4>", unsafe_allow_html=True)
 
-            # Estimate (real chain often unavailable on free tier for leveraged ETFs)
             strike = round(price * (0.9 if is_put else 1.1), 2)
             premium = round(price * 0.04, 2)
             iv = rv or 85
@@ -283,7 +286,11 @@ with tab2:
                     save_persistent_data()
                     st.success(f"{trade_type} logged")
                     st.rerun()
+            else:
+                st.button(f"Log {'CSP Put' if is_put else 'Covered Call'} on {ticker}", disabled=True, key=f"disabled_{ticker}")
+            st.markdown('</div>', unsafe_allow_html=True)
 
+    # Open trades and held shares (unchanged)
     st.subheader("Open Wheel Trades")
     for t in st.session_state.trades:
         if t.get("status") == "open":
@@ -309,7 +316,7 @@ with tab2:
                             st.session_state.held_shares.append({"ticker": t["ticker"], "shares": shares, "cost_basis": round(cost_basis, 2), "entry_date": datetime.now().strftime("%Y-%m-%d")})
                             t["status"] = "assigned"
                             save_persistent_data()
-                            st.success(f"Assigned! {shares} shares ready for Covered Calls")
+                            st.success(f"Assigned! {shares} shares ready")
                             st.rerun()
 
     st.subheader("Held Shares")
@@ -321,31 +328,117 @@ with tab2:
                 st.success("Wheel complete!")
                 st.rerun()
 
+    # ==================== OPTIONS MATRIX (ANY TICKER) ====================
+    st.subheader("📊 Options Matrix (30 DTE) – P&L Color Map")
+    matrix_ticker = st.text_input("Enter any ticker for matrix (e.g. AAPL, NVDA, QQQ)", value="QQQ", key="matrix_input").upper().strip()
+    if st.button("Load Options Matrix", type="primary"):
+        price_data = fetch_quote(matrix_ticker)
+        price = price_data["c"] if price_data and price_data.get("c") else 0
+        if not price:
+            st.error("Ticker not found or no price data")
+            st.stop()
+
+        options_raw = fetch_options_chain(matrix_ticker)
+        rows = []
+        source = "Estimated (Finnhub free-tier limitation)"
+
+        if options_raw:
+            today = datetime.now().date()
+            valid = [c for c in options_raw if 'expiry' in c]
+            expiries = {}
+            for c in valid:
+                exp_date = datetime.strptime(c['expiry'], "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+                if dte > 0:
+                    expiries.setdefault(dte, []).append(c)
+            if expiries:
+                closest_dte = min(expiries.keys(), key=lambda d: abs(d - 30))
+                chain = expiries[closest_dte]
+                for c in chain:
+                    strike = c['strike']
+                    prem = round((c.get('bid',0) + c.get('ask',0))/2, 2)
+                    iv = c.get('iv') or "—"
+                    opt_type = "Put" if c.get('putCall') == 'P' else "Call"
+                    pnl = prem if (opt_type == "Put" and price > strike) or (opt_type == "Call" and price < strike) else prem - abs(price - strike)
+                    rows.append({"Type": opt_type, "Strike": strike, "Premium": prem, "IV %": iv, "P&L (sell, unchanged price)": round(pnl, 2)})
+                source = "✅ REAL Finnhub chain"
+
+        if not rows:
+            for pct in [0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20, 1.25, 1.30]:
+                strike = round(price * pct, 2)
+                is_call = pct > 1.0
+                prem = round(price * 0.04, 2)
+                pnl = prem if (is_call and price < strike) or (not is_call and price > strike) else prem - abs(price - strike)
+                rows.append({"Type": "Call" if is_call else "Put", "Strike": strike, "Premium": prem, "IV %": "—", "P&L (sell, unchanged price)": round(pnl, 2)})
+
+        df_matrix = pd.DataFrame(rows).sort_values("Strike")
+        def color_pnl(val):
+            return f'background-color: {"#2e7d32" if val > 0 else "#d32f2f"}; color: white'
+        styled = df_matrix.style.map(color_pnl, subset=['P&L (sell, unchanged price)'])
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.caption(f"Source: {source} • Green = profit if stock unchanged at expiry • Red = loss")
+
 with tab3:
-    st.subheader("LEAP Calls • House Money Only")
-    st.metric("House Money Available", f"${st.session_state.leap_fund:,.0f}")
-    leap_ticker = st.selectbox("LEAP Ticker", st.session_state.tickers, key="leap_sel")
-    leap_data = st.session_state.market_data.get(leap_ticker, {})
-    leap_rsi = leap_data.get("rsi")
-    can_buy = st.session_state.vix > 30 and leap_rsi and leap_rsi < 40
-    if st.button("Add LEAP (360+ DTE)", type="primary" if can_buy else "secondary"):
-        if not can_buy:
-            st.error("LEAP entry rules not met: Need VIX >30 and RSI <40")
-        elif st.session_state.leap_fund >= 1000:
-            st.session_state.leaps.append({
-                "id": int(time.time()),
-                "ticker": leap_ticker,
-                "cost": 1200,
-                "current_val": 1200,
-                "contracts": 1,
-                "expiry": (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
-            })
-            st.session_state.leap_fund -= 1200
-            save_persistent_data()
-            st.success("LEAP added with house money ✅")
-            st.rerun()
+    st.subheader("🚀 LEAP Calls • Any Ticker (360+ DTE)")
+    leap_ticker_input = st.text_input("Enter any ticker for LEAP (e.g. NVDA, AAPL, QQQ)", value="QQQ", key="leap_input").upper().strip()
+    if st.button("Load LEAP Data (360+ DTE)"):
+        price_data = fetch_quote(leap_ticker_input)
+        price = price_data["c"] if price_data and price_data.get("c") else 0
+        if not price:
+            st.error("Ticker not found")
+            st.stop()
+
+        options_raw = fetch_options_chain(leap_ticker_input)
+        leap_rsi = calc_rsi(fetch_candles(leap_ticker_input))
+        if options_raw:
+            today = datetime.now().date()
+            valid = [c for c in options_raw if 'expiry' in c]
+            expiries = {}
+            for c in valid:
+                exp_date = datetime.strptime(c['expiry'], "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+                if dte >= 360:
+                    expiries.setdefault(dte, []).append(c)
+            if expiries:
+                closest_dte = min(expiries.keys())
+                chain = expiries[closest_dte]
+                calls = [c for c in chain if c.get('putCall') == 'C']
+                if calls:
+                    otm_call = min(calls, key=lambda c: abs(c['strike'] - price*1.10))
+                    strike = otm_call['strike']
+                    premium = round((otm_call.get('bid',0) + otm_call.get('ask',0))/2, 2)
+                    iv = otm_call.get('iv') or "—"
+                    expiry = chain[0]['expiry']
+                    st.success(f"✅ LEAP Call for {leap_ticker_input}")
+                    st.metric("Price", f"${price:,.2f}")
+                    st.metric("Strike (≈10% OTM)", f"${strike}")
+                    st.metric("Premium", f"${premium}")
+                    st.metric("IV", f"{iv}%")
+                    st.metric("DTE", f"{closest_dte} days")
+                    st.metric("Expiry", expiry)
+                    st.metric("RSI", f"{leap_rsi if leap_rsi else '—'}")
+                    if st.button("Add this LEAP (house money only)", key="add_leap"):
+                        if st.session_state.leap_fund >= 1000:
+                            st.session_state.leaps.append({
+                                "id": int(time.time()),
+                                "ticker": leap_ticker_input,
+                                "cost": premium * 100,
+                                "current_val": premium * 100,
+                                "contracts": 1,
+                                "expiry": expiry
+                            })
+                            st.session_state.leap_fund -= premium * 100
+                            save_persistent_data()
+                            st.success("LEAP added!")
+                            st.rerun()
+                        else:
+                            st.error("Not enough house money")
+                else:
+                    st.warning("No suitable 360+ DTE call found")
+            else:
+                st.warning("No 360+ DTE options available")
         else:
-            st.error("Not enough house money")
+            st.warning("Options chain unavailable – using estimate")
 
     st.subheader("Your LEAP Positions")
     for l in st.session_state.leaps:
@@ -355,7 +448,7 @@ with tab3:
                 st.session_state.leap_fund += l["cost"] * 0.8
                 l["contracts"] = max(0, l["contracts"] - 1)
                 save_persistent_data()
-                st.success("Half sold • Profits added to House Money")
+                st.success("Half sold")
                 st.rerun()
 
 with tab4:
@@ -413,17 +506,6 @@ with tab6:
             st.rerun()
 
     st.divider()
-    st.write("**House Money**")
-    st.metric("Current House Money", f"${st.session_state.leap_fund:,.0f}")
-
-    st.divider()
-    st.write("**Journal Entries**")
-    if st.session_state.journal:
-        st.dataframe(pd.DataFrame(st.session_state.journal), use_container_width=True)
-    else:
-        st.info("No closed trades yet.")
-
-    st.divider()
     st.write("**Watched Tickers**")
     for t in st.session_state.tickers:
         col1, col2 = st.columns([4,1])
@@ -463,4 +545,4 @@ if st.button("🔄 Safe Full Refresh (≤50 calls/min)"):
     st.success("Safe batch update completed")
     st.rerun()
 
-st.caption("WheelOS • Matt @MarketMovesMatt Strategy • CSP Income + LEAP Growth")
+st.caption("WheelOS • Matt Strategy • Color-coded CSP • Any-Ticker Matrix & LEAPs")
