@@ -12,9 +12,26 @@ st.markdown("""
     <style>
         .stApp { background-color: #f8f9fa; }
         .metric-label { font-size: 0.9rem; color: #555; }
-        .red-day { background-color: #ffebee; border-left: 5px solid #d32f2f; }
-        .green-day { background-color: #e8f5e9; border-left: 5px solid #2e7d32; }
-        .no-trade { background-color: #f5f5f5; border-left: 5px solid #9e9e9e; }
+        
+        /* Color styles for expanders */
+        .red-expander {
+            background-color: #ffebee !important;
+            border-left: 6px solid #d32f2f;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .green-expander {
+            background-color: #e8f5e9 !important;
+            border-left: 6px solid #2e7d32;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .gray-expander {
+            background-color: #f5f5f5 !important;
+            border-left: 6px solid #9e9e9e;
+            padding: 10px;
+            border-radius: 4px;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -74,7 +91,7 @@ GREEN_THRESHOLD = 5.0
 VIX_LIMIT = 25
 MAX_CALLS_PER_MIN = 50
 
-# Finnhub Helpers (same as before)
+# Finnhub Helpers
 def fetch_quote(sym):
     if not st.session_state.finnhub_key: return None
     try:
@@ -224,7 +241,7 @@ with tab2:
         has_held = any(h['ticker'] == ticker for h in st.session_state.held_shares)
 
         signal = "NO TRADE"
-        css_class = "no-trade"
+        expander_class = "gray-expander"
         button_type = "secondary"
         is_put = True
 
@@ -234,17 +251,18 @@ with tab2:
             signal = "NO TRADE (RSI >60 or Low IV)"
         elif chg <= RED_THRESHOLD:
             signal = f"SELL CSP PUT (Red Day {chg:.1f}%)"
-            css_class = "red-day"
+            expander_class = "red-expander"
             button_type = "primary"
             is_put = True
         elif chg >= GREEN_THRESHOLD and has_held:
             signal = f"SELL COVERED CALL (Green Day {chg:.1f}%)"
-            css_class = "green-day"
+            expander_class = "green-expander"
             button_type = "primary"
             is_put = False
 
+        # Use HTML wrapper for colored expander
+        st.markdown(f'<div class="{expander_class}">', unsafe_allow_html=True)
         with st.expander(f"{ticker} — **{signal}**", expanded=False):
-            st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
             st.markdown(f"<h4 style='margin:0'>{signal}</h4>", unsafe_allow_html=True)
 
             strike = round(price * (0.9 if is_put else 1.1), 2)
@@ -288,9 +306,9 @@ with tab2:
                     st.rerun()
             else:
                 st.button(f"Log {'CSP Put' if is_put else 'Covered Call'} on {ticker}", disabled=True, key=f"disabled_{ticker}")
-            st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    # Open trades and held shares (unchanged)
+    # Open trades and held shares
     st.subheader("Open Wheel Trades")
     for t in st.session_state.trades:
         if t.get("status") == "open":
@@ -328,7 +346,7 @@ with tab2:
                 st.success("Wheel complete!")
                 st.rerun()
 
-    # ==================== OPTIONS MATRIX (ANY TICKER) ====================
+    # Options Matrix for any ticker
     st.subheader("📊 Options Matrix (30 DTE) – P&L Color Map")
     matrix_ticker = st.text_input("Enter any ticker for matrix (e.g. AAPL, NVDA, QQQ)", value="QQQ", key="matrix_input").upper().strip()
     if st.button("Load Options Matrix", type="primary"):
@@ -545,4 +563,4 @@ if st.button("🔄 Safe Full Refresh (≤50 calls/min)"):
     st.success("Safe batch update completed")
     st.rerun()
 
-st.caption("WheelOS • Matt Strategy • Color-coded CSP • Any-Ticker Matrix & LEAPs")
+st.caption("WheelOS • Color-coded CSP Expanders + Any-Ticker Matrix & LEAPs")
