@@ -36,7 +36,7 @@ if 'vix' not in st.session_state:
     st.session_state.vix = 20.0
 
 VIX_LIMIT = 25
-MOVE_PCT = 1.5          # Matt’s red-day rule (1–3%+). Change to 5.0 if you prefer stricter
+MOVE_PCT = 1.5
 MAX_CALLS_PER_MIN = 50
 
 # ==================== FINNHUB HELPERS ====================
@@ -60,11 +60,8 @@ def fetch_candles(sym):
         if data.get("s") == "ok":
             return pd.DataFrame({
                 "time": pd.to_datetime(data["t"], unit="s").dt.strftime("%Y-%m-%d"),
-                "open": data["o"],
-                "high": data["h"],
-                "low": data["l"],
-                "close": data["c"],
-                "volume": data.get("v", [0] * len(data["c"]))   # ← Volume added here
+                "open": data["o"], "high": data["h"], "low": data["l"], "close": data["c"],
+                "volume": data.get("v", [0] * len(data["c"]))
             })
     except:
         pass
@@ -114,7 +111,6 @@ def next_expiry(days=30):
 
 def safe_batch_update(tickers):
     updated = 0
-    # VIX
     vix_q = fetch_quote("VIX")
     if vix_q and vix_q.get("c"):
         st.session_state.vix = round(vix_q["c"], 2)
@@ -166,7 +162,6 @@ with st.sidebar:
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "🔁 CSP Trades", "🚀 LEAP Trades", "📈 Super Chart", "📅 Calendar", "⚙️ Settings"])
 
 with tab1:
-    # ... (Dashboard unchanged for brevity – same as last version)
     st.subheader("Matt’s Profit Recycling Loop")
     st.info("CSP on red days → Close at 50% → 50% income, 50% to LEAP fund (house money only)")
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -205,8 +200,6 @@ with tab2:
             continue
 
         chg = d.get("change", 0)
-
-        # Signal logic – RV missing no longer blocks red-day trades
         signal = "NO TRADE"
         color_style = "color: gray;"
         button_type = "secondary"
@@ -223,8 +216,7 @@ with tab2:
         with st.expander(f"{ticker} — **{signal}**"):
             st.markdown(f"<h4 style='{color_style}'>{signal}</h4>", unsafe_allow_html=True)
 
-            # === ALL PARAMETERS DISPLAY ===
-            opts = estimate_options(price, price * 0.90, 30, rv)  # always compute premium
+            opts = estimate_options(price, price * 0.90, 30, rv)
             dte_date = next_expiry().strftime("%Y-%m-%d")
 
             cols = st.columns([2, 2, 2, 2])
@@ -241,12 +233,10 @@ with tab2:
                 st.metric("RSI", f"{rsi if rsi else '—'}")
                 st.metric("Volume", f"{volume:,.0f}" if volume else "—")
 
-            # Position sizing suggestion
             max_cash = st.session_state.capital * 0.25
             suggested_contracts = int(max_cash // (price * 100)) if price else 0
             st.caption(f"**Suggested size**: ~{suggested_contracts} contracts (25% of capital)")
 
-            # Log button only on valid red-day signal
             if chg <= -MOVE_PCT and st.session_state.vix < VIX_LIMIT:
                 if st.button(f"Log Sell CSP Put on {ticker}", key=f"put_{ticker}", type=button_type):
                     expiry = next_expiry()
@@ -266,7 +256,6 @@ with tab2:
             else:
                 st.button(f"Log Sell CSP Put on {ticker}", disabled=True, key=f"put_disabled_{ticker}")
 
-    # Open trades section (unchanged)
     st.subheader("Open CSP Trades")
     for t in st.session_state.trades:
         if t.get("status") == "open":
@@ -289,17 +278,50 @@ with tab2:
                     st.success(f"Closed! ${profit} profit → ${profit*0.5:.0f} added to House Money")
                     st.rerun()
 
-# LEAP, Settings, etc. tabs unchanged (same as previous version)
 with tab3:
-    # ... (LEAP tab same as last version)
-    pass
+    st.subheader("LEAP Calls • House Money Only (VIX >30 + RSI <40)")
+    st.metric("House Money Available", f"${st.session_state.leap_fund:,.0f}")
+    leap_ticker = st.selectbox("LEAP Ticker", st.session_state.tickers, key="leap_sel")
+    leap_data = st.session_state.market_data.get(leap_ticker, {})
+    leap_rsi = leap_data.get("rsi")
+    can_buy = st.session_state.vix > 30 and leap_rsi and leap_rsi < 40
+
+    if st.button("Add LEAP (360+ DTE)", type="primary" if can_buy else "secondary"):
+        if not can_buy:
+            st.error("LEAP entry rules not met: Need VIX >30 **and** RSI <40")
+        elif st.session_state.leap_fund >= 1000:
+            st.session_state.leaps.append({
+                "id": int(time.time()),
+                "ticker": leap_ticker,
+                "cost": 1200,
+                "current_val": 1200,
+                "contracts": 1,
+                "expiry": (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
+            })
+            st.session_state.leap_fund -= 1200
+            st.success("LEAP added with house money ✅")
+            st.rerun()
+        else:
+            st.error("Not enough house money")
+
+    st.subheader("Your LEAP Positions")
+    for l in st.session_state.leaps:
+        with st.expander(f"{l['ticker']} LEAP"):
+            st.write(f"Cost: ${l['cost']} | Current: ${l['current_val']} | Expiry: {l['expiry']}")
+            profit_pct = ((l['current_val'] - l['cost']) / l['cost']) * 100
+            if profit_pct > 100:
+                st.success("🎯 >100% profit – Consider selling!")
+            if st.button("Sell Half & Recycle", key=l["id"]):
+                st.session_state.leap_fund += l["cost"] * 0.8
+                l["contracts"] = max(0, l["contracts"] - 1)
+                st.success("Half sold • Profits added to House Money")
+                st.rerun()
 
 with tab4:
     st.subheader("TradingView Super Chart + RSI")
     ticker = st.selectbox("Select Leveraged Ticker", st.session_state.tickers, key="superchart_ticker")
     st.write(f"**Showing:** {ticker} (daily + RSI)")
 
-    # Mobile-optimized TradingView widget
     tv_html = f"""
     <div style="width:100%; height:600px; position:relative; margin:0 auto;">
       <div id="tradingview_widget" style="width:100%; height:100%;"></div>
@@ -326,14 +348,61 @@ with tab4:
     st.components.v1.html(tv_html, height=620, scrolling=False)
 
 with tab5:
-    # ... (Calendar unchanged)
-    pass
+    st.subheader("📅 Upcoming Economic Events")
+    st.info("Avoid new trades on high VIX (≥25) or major events – calendar placeholder")
 
 with tab6:
-    # ... (Settings unchanged)
-    pass
+    st.subheader("⚙️ Settings")
+    st.write("**Investment Capital**")
+    capital_options = [10000, 20000, 30000, 50000, 100000]
+    selected = st.selectbox("Select starting capital", capital_options, index=1)
+    manual = st.number_input("Or enter custom amount", min_value=5000, value=st.session_state.capital, step=1000)
+    if st.button("Save Capital"):
+        st.session_state.capital = manual if manual != st.session_state.capital else selected
+        st.success(f"Capital set to ${st.session_state.capital:,.0f}")
 
-# Auto-refresh
+    st.divider()
+    st.write("**House Money**")
+    st.metric("Current House Money", f"${st.session_state.leap_fund:,.0f}")
+
+    st.divider()
+    st.write("**Journal Entries** (Closed Trades)")
+    if st.session_state.journal:
+        journal_df = pd.DataFrame(st.session_state.journal)
+        st.dataframe(journal_df, use_container_width=True)
+    else:
+        st.info("No closed trades yet.")
+
+    st.divider()
+    st.write("**Watched Tickers**")
+    for t in st.session_state.tickers:
+        col1, col2 = st.columns([4,1])
+        with col1: st.write(f"• {t}")
+        with col2:
+            if st.button("Remove", key=f"rem_{t}"):
+                if len(st.session_state.tickers) > 1:
+                    st.session_state.tickers.remove(t)
+                    st.success(f"Removed {t}")
+                    st.rerun()
+                else:
+                    st.error("Keep at least one ticker")
+
+    st.divider()
+    st.write("**Add New Ticker**")
+    new_t = st.text_input("Ticker Symbol").upper().strip()
+    if st.button("Add Ticker"):
+        if new_t and new_t not in st.session_state.tickers:
+            q = fetch_quote(new_t)
+            if q and q.get("c"):
+                st.session_state.tickers.append(new_t)
+                st.success(f"Added {new_t}")
+                st.rerun()
+            else:
+                st.error("Ticker not found or no data")
+        else:
+            st.warning("Already watching or empty input")
+
+# Auto-refresh every 15 minutes
 if 'last_refresh' not in st.session_state:
     st.session_state.last_refresh = time.time()
 if time.time() - st.session_state.last_refresh > 900:
