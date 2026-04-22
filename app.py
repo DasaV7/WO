@@ -8,30 +8,39 @@ from datetime import datetime, timedelta
 
 st.set_page_config(page_title="WheelOS • Options Radar", page_icon="◈", layout="wide")
 
+# iOS-style Apple minimalist theme
 st.markdown("""
     <style>
-        .stApp { background-color: #f8f9fa; }
+        .stApp { background-color: #f8f9fa; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         .metric-label { font-size: 0.9rem; color: #555; }
         
-        /* Color styles for expanders */
-        .red-expander {
-            background-color: #ffebee !important;
-            border-left: 6px solid #d32f2f;
-            padding: 10px;
-            border-radius: 4px;
+        /* iOS-style buttons */
+        .stButton > button {
+            border-radius: 12px !important;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1) !important;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+            height: 48px !important;
+            font-weight: 500 !important;
         }
-        .green-expander {
-            background-color: #e8f5e9 !important;
-            border-left: 6px solid #2e7d32;
-            padding: 10px;
-            border-radius: 4px;
+        .stButton > button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
         }
-        .gray-expander {
-            background-color: #f5f5f5 !important;
-            border-left: 6px solid #9e9e9e;
-            padding: 10px;
-            border-radius: 4px;
+        .stButton > button:active {
+            transform: scale(0.96);
         }
+        
+        /* iOS-style selectboxes & inputs */
+        .stSelectbox, .stTextInput > div > div > input {
+            border-radius: 12px !important;
+        }
+        
+        /* Colored expander headers */
+        .red-expander { background-color: #ffebee !important; border-left: 6px solid #d32f2f; padding: 12px; border-radius: 12px; }
+        .green-expander { background-color: #e8f5e9 !important; border-left: 6px solid #2e7d32; padding: 12px; border-radius: 12px; }
+        .gray-expander { background-color: #f5f5f5 !important; border-left: 6px solid #9e9e9e; padding: 12px; border-radius: 12px; }
+        
+        .stExpander { border-radius: 12px !important; overflow: hidden; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -62,7 +71,7 @@ def save_persistent_data():
     with open(DATA_FILE, "w") as f:
         json.dump(data, f)
 
-# Load API Key
+# Load API Key (persists forever)
 if 'finnhub_key' not in st.session_state:
     st.session_state.finnhub_key = st.secrets.get("finnhub", {}).get("key", "")
     if not st.session_state.finnhub_key and KEY_FILE.exists():
@@ -91,7 +100,7 @@ GREEN_THRESHOLD = 5.0
 VIX_LIMIT = 25
 MAX_CALLS_PER_MIN = 50
 
-# Finnhub Helpers
+# Finnhub Helpers (unchanged)
 def fetch_quote(sym):
     if not st.session_state.finnhub_key: return None
     try:
@@ -161,7 +170,7 @@ def safe_batch_update(tickers):
             updated += 2
         time.sleep(1.2)
 
-# First-time setup
+# First-time setup (unchanged)
 if not st.session_state.finnhub_key:
     st.title("Welcome to WheelOS")
     st.markdown("### First Time Setup")
@@ -200,6 +209,7 @@ with st.sidebar:
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "🔁 CSP / Wheel Trades", "🚀 LEAP Trades", "📈 Super Chart", "📅 Calendar", "⚙️ Settings"])
 
 with tab1:
+    # Dashboard (unchanged)
     st.subheader("Matt’s Profit Recycling Loop")
     st.info("CSP on red days → Close at 50% → 50% income, 50% to LEAP fund (house money only)")
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -241,7 +251,7 @@ with tab2:
         has_held = any(h['ticker'] == ticker for h in st.session_state.held_shares)
 
         signal = "NO TRADE"
-        expander_class = "gray-expander"
+        css_class = "gray-expander"
         button_type = "secondary"
         is_put = True
 
@@ -251,19 +261,19 @@ with tab2:
             signal = "NO TRADE (RSI >60 or Low IV)"
         elif chg <= RED_THRESHOLD:
             signal = f"SELL CSP PUT (Red Day {chg:.1f}%)"
-            expander_class = "red-expander"
+            css_class = "red-expander"
             button_type = "primary"
             is_put = True
         elif chg >= GREEN_THRESHOLD and has_held:
             signal = f"SELL COVERED CALL (Green Day {chg:.1f}%)"
-            expander_class = "green-expander"
+            css_class = "green-expander"
             button_type = "primary"
             is_put = False
 
-        # Use HTML wrapper for colored expander
-        st.markdown(f'<div class="{expander_class}">', unsafe_allow_html=True)
+        # iOS-style colored header
+        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
         with st.expander(f"{ticker} — **{signal}**", expanded=False):
-            st.markdown(f"<h4 style='margin:0'>{signal}</h4>", unsafe_allow_html=True)
+            st.markdown(f"<h4 style='margin:0; color:inherit'>{signal}</h4>", unsafe_allow_html=True)
 
             strike = round(price * (0.9 if is_put else 1.1), 2)
             premium = round(price * 0.04, 2)
@@ -308,7 +318,7 @@ with tab2:
                 st.button(f"Log {'CSP Put' if is_put else 'Covered Call'} on {ticker}", disabled=True, key=f"disabled_{ticker}")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # Open trades and held shares
+    # Open trades and held shares (unchanged)
     st.subheader("Open Wheel Trades")
     for t in st.session_state.trades:
         if t.get("status") == "open":
@@ -346,21 +356,22 @@ with tab2:
                 st.success("Wheel complete!")
                 st.rerun()
 
-    # Options Matrix for any ticker
-    st.subheader("📊 Options Matrix (30 DTE) – P&L Color Map")
-    matrix_ticker = st.text_input("Enter any ticker for matrix (e.g. AAPL, NVDA, QQQ)", value="QQQ", key="matrix_input").upper().strip()
+    # Options Matrix with profit % and color scale
+    st.subheader("📊 Options Matrix (30 DTE) – P&L % Color Map")
+    matrix_ticker = st.text_input("Enter any ticker (e.g. AAPL, NVDA, QQQ)", value="QQQ", key="matrix_input").upper().strip()
     if st.button("Load Options Matrix", type="primary"):
         price_data = fetch_quote(matrix_ticker)
         price = price_data["c"] if price_data and price_data.get("c") else 0
         if not price:
-            st.error("Ticker not found or no price data")
+            st.error("Ticker not found")
             st.stop()
 
-        options_raw = fetch_options_chain(matrix_ticker)
         rows = []
         source = "Estimated (Finnhub free-tier limitation)"
 
+        options_raw = fetch_options_chain(matrix_ticker)
         if options_raw:
+            # Try real data
             today = datetime.now().date()
             valid = [c for c in options_raw if 'expiry' in c]
             expiries = {}
@@ -378,24 +389,31 @@ with tab2:
                     iv = c.get('iv') or "—"
                     opt_type = "Put" if c.get('putCall') == 'P' else "Call"
                     pnl = prem if (opt_type == "Put" and price > strike) or (opt_type == "Call" and price < strike) else prem - abs(price - strike)
-                    rows.append({"Type": opt_type, "Strike": strike, "Premium": prem, "IV %": iv, "P&L (sell, unchanged price)": round(pnl, 2)})
+                    profit_pct = (pnl / price) * 100 if price else 0
+                    rows.append({"Type": opt_type, "Strike": strike, "Premium": prem, "IV %": iv, "Profit %": round(profit_pct, 1)})
                 source = "✅ REAL Finnhub chain"
 
         if not rows:
-            for pct in [0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20, 1.25, 1.30]:
+            # Synthetic matrix with -10% ITM, ATM, +10% OTM for puts & calls
+            for pct in [0.90, 1.00, 1.10]:
                 strike = round(price * pct, 2)
                 is_call = pct > 1.0
                 prem = round(price * 0.04, 2)
                 pnl = prem if (is_call and price < strike) or (not is_call and price > strike) else prem - abs(price - strike)
-                rows.append({"Type": "Call" if is_call else "Put", "Strike": strike, "Premium": prem, "IV %": "—", "P&L (sell, unchanged price)": round(pnl, 2)})
+                profit_pct = (pnl / price) * 100 if price else 0
+                rows.append({"Type": "Call" if is_call else "Put", "Strike": strike, "Premium": prem, "IV %": "—", "Profit %": round(profit_pct, 1)})
 
         df_matrix = pd.DataFrame(rows).sort_values("Strike")
-        def color_pnl(val):
-            return f'background-color: {"#2e7d32" if val > 0 else "#d32f2f"}; color: white'
-        styled = df_matrix.style.map(color_pnl, subset=['P&L (sell, unchanged price)'])
+        def color_profit(val):
+            if val > 2: return 'background-color: #2e7d32; color: white'
+            if val > 0: return 'background-color: #81c784; color: white'
+            if val == 0: return 'background-color: #f5f5f5'
+            return 'background-color: #ef5350; color: white'
+        styled = df_matrix.style.map(color_profit, subset=['Profit %'])
         st.dataframe(styled, use_container_width=True, hide_index=True)
-        st.caption(f"Source: {source} • Green = profit if stock unchanged at expiry • Red = loss")
+        st.caption(f"Source: {source} • Profit % assumes stock price unchanged at 30 DTE • Green = OTM profit • Red = ITM loss")
 
+# LEAP tab, Super Chart, Settings, etc. (unchanged from previous stable version)
 with tab3:
     st.subheader("🚀 LEAP Calls • Any Ticker (360+ DTE)")
     leap_ticker_input = st.text_input("Enter any ticker for LEAP (e.g. NVDA, AAPL, QQQ)", value="QQQ", key="leap_input").upper().strip()
@@ -563,4 +581,4 @@ if st.button("🔄 Safe Full Refresh (≤50 calls/min)"):
     st.success("Safe batch update completed")
     st.rerun()
 
-st.caption("WheelOS • Color-coded CSP Expanders + Any-Ticker Matrix & LEAPs")
+st.caption("WheelOS • iOS-style UI + Color-coded CSP Headers + Profit % Matrix")
