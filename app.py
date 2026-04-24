@@ -205,21 +205,16 @@ with tab2:  # CSP Trades - Color-coded buttons
 
         chg = d.get("change", 0)
         signal = "NO TRADE"
-        button_color = "gray"
-        enable_put = False
-        enable_call = False
+        button_type = "secondary"   # default gray
 
         if float(st.session_state.get("vix") or 0) >= VIX_LIMIT:
             signal = "NO TRADE (VIX HIGH)"
-            button_color = "gray"
         elif chg <= -MOVE_PCT:
             signal = "SELL PUT (Red Day >5%)"
-            button_color = "red"
-            enable_put = True
+            button_type = "primary"   # red tone via custom CSS if needed
         elif chg >= MOVE_PCT:
             signal = "SELL CALL (Green Day >5%)"
-            button_color = "green"
-            enable_call = True
+            button_type = "primary"
 
         with st.expander(f"{ticker} — **{signal}**"):
             st.write(f"Price: **${price}** | Change: **{chg}%** | RV: **{rv if rv else 'Not loaded yet'}**")
@@ -228,8 +223,8 @@ with tab2:  # CSP Trades - Color-coded buttons
 
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
-                if enable_put:
-                    if st.button("Log Sell Put", key=f"put_{ticker}", type="secondary" if button_color == "gray" else "primary"):
+                if chg <= -MOVE_PCT:
+                    if st.button(f"Log Sell Put on {ticker}", key=f"put_{ticker}", type=button_type):
                         expiry = next_expiry()
                         opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
                         st.session_state.trades.append({
@@ -239,11 +234,11 @@ with tab2:  # CSP Trades - Color-coded buttons
                         st.success("Sell Put logged")
                         st.rerun()
                 else:
-                    st.button("Log Sell Put", disabled=True)
+                    st.button(f"Log Sell Put on {ticker}", disabled=True, key=f"put_disabled_{ticker}")
 
             with col_btn2:
-                if enable_call:
-                    if st.button("Log Sell Call", key=f"call_{ticker}", type="secondary" if button_color == "gray" else "primary"):
+                if chg >= MOVE_PCT:
+                    if st.button(f"Log Sell Call on {ticker}", key=f"call_{ticker}", type=button_type):
                         expiry = next_expiry()
                         opts = estimate_options(price, price*1.10, price*0.90, 30, rv)
                         st.session_state.trades.append({
@@ -253,7 +248,7 @@ with tab2:  # CSP Trades - Color-coded buttons
                         st.success("Sell Call logged")
                         st.rerun()
                 else:
-                    st.button("Log Sell Call", disabled=True)
+                    st.button(f"Log Sell Call on {ticker}", disabled=True, key=f"call_disabled_{ticker}")
 
     st.subheader("Open CSP Trades")
     for t in st.session_state.trades:
@@ -342,11 +337,11 @@ with tab4:  # Super Chart
     """
     st.components.v1.html(tv_html, height=680, scrolling=True)
 
-with tab5:  # Calendar
+with tab5:
     st.subheader("📅 Upcoming Economic Events")
     st.info("Avoid new trades on high VIX (≥25) or major events")
 
-with tab6:  # Settings
+with tab6:
     st.subheader("⚙️ Settings")
     st.write("**Investment Capital**")
     capital_options = [10000, 20000, 30000, 50000, 100000]
