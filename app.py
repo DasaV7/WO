@@ -247,7 +247,6 @@ with tab2:
         with st.expander(f"{ticker} — **{signal}**", expanded=False):
             st.markdown(f"<h4 style='margin:0'>{signal}</h4>", unsafe_allow_html=True)
 
-            # Real options only - no estimates
             options_raw = fetch_options_chain(ticker)
             if options_raw:
                 today = datetime.now().date()
@@ -272,12 +271,15 @@ with tab2:
                         source = "✅ REAL Finnhub"
                     else:
                         st.warning("No suitable real option found for this direction")
+                        st.markdown('</div>', unsafe_allow_html=True)
                         continue
                 else:
                     st.warning("No 30 DTE options chain available from Finnhub for this ticker")
+                    st.markdown('</div>', unsafe_allow_html=True)
                     continue
             else:
-                st.warning("Options chain unavailable from Finnhub for this ticker")
+                st.warning("Options chain unavailable from Finnhub for this ticker (free tier limitation common for leveraged ETFs)")
+                st.markdown('</div>', unsafe_allow_html=True)
                 continue
 
             cols = st.columns([2,2,2,2])
@@ -355,8 +357,8 @@ with tab2:
                 st.rerun()
 
     # Options Matrix - Real data only
-    st.subheader("📊 Options Matrix (30 DTE) – Real Finnhub Data")
-    matrix_ticker = st.text_input("Enter any ticker (e.g. AAPL, NVDA, QQQ)", value="QQQ", key="matrix_input").upper().strip()
+    st.subheader("📊 Options Matrix (30 DTE) – Real Finnhub Data Only")
+    matrix_ticker = st.text_input("Enter any ticker (e.g. AAPL, NVDA, QQQ, SPY)", value="QQQ", key="matrix_input").upper().strip()
     if st.button("Load Real Options Matrix", type="primary"):
         price_data = fetch_quote(matrix_ticker)
         price = price_data["c"] if price_data and price_data.get("c") else 0
@@ -365,8 +367,8 @@ with tab2:
             st.stop()
 
         options_raw = fetch_options_chain(matrix_ticker)
-        if not options_raw:
-            st.error("No options chain data available from Finnhub for this ticker (free tier limitation common for some symbols)")
+        if not options_raw or len(options_raw) == 0:
+            st.error(f"No options chain data available from Finnhub for **{matrix_ticker}**.\n\nFree tier often returns empty data for leveraged ETFs. Try **QQQ**, **SPY**, **AAPL**, or **NVDA** instead.")
             st.stop()
 
         rows = []
@@ -415,8 +417,8 @@ with tab3:
 
         options_raw = fetch_options_chain(leap_ticker_input)
         leap_rsi = calc_rsi(fetch_candles(leap_ticker_input))
-        if not options_raw:
-            st.error("No options chain data from Finnhub for this ticker")
+        if not options_raw or len(options_raw) == 0:
+            st.error(f"No options chain data from Finnhub for **{leap_ticker_input}**. Try QQQ, SPY, AAPL or NVDA.")
             st.stop()
 
         today = datetime.now().date()
@@ -509,10 +511,7 @@ with tab4:
 
 with tab5:
     st.subheader("📅 Economic Calendar")
-    st.info("Upcoming economic events (real data from reliable sources)")
-    # Placeholder for real calendar - you can enhance with Investing.com or TradingEconomics scraping/API later
-    st.write("**Major Events Today / Near Term** (Finnhub / public sources)")
-    # For now, show a static example - replace with real fetch if you add a calendar API key later
+    st.info("Upcoming major events (placeholder - real data can be added via API later)")
     calendar_data = pd.DataFrame({
         "Date": ["2026-04-24", "2026-04-25", "2026-04-30"],
         "Event": ["GDP Flash Estimate (US)", "FOMC Rate Decision", "Non-Farm Payrolls"],
@@ -582,4 +581,4 @@ if st.button("🔄 Safe Full Refresh (≤50 calls/min)"):
     st.success("Safe batch update completed")
     st.rerun()
 
-st.caption("WheelOS • Real Finnhub Data Only • iOS-style UI")
+st.caption("WheelOS • Real Finnhub Data Only • No Estimates")
