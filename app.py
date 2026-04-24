@@ -2,79 +2,75 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
-import json
-from pathlib import Path
 from datetime import datetime, timedelta
+from streamlit_lightweight_charts import renderLightweightCharts
 
 st.set_page_config(page_title="WheelOS • Options Radar", page_icon="◈", layout="wide")
 
+# Apple minimalist light theme
 st.markdown("""
-    <style>
-        .stApp { background-color: #f8f9fa; }
-        .metric-label { font-size: 0.9rem; color: #555; }
-        .red-expander { background-color: #ffebee !important; border-left: 6px solid #d32f2f; padding: 12px; border-radius: 12px; }
-        .green-expander { background-color: #e8f5e9 !important; border-left: 6px solid #2e7d32; padding: 12px; border-radius: 12px; }
-        .gray-expander { background-color: #f5f5f5 !important; border-left: 6px solid #9e9e9e; padding: 12px; border-radius: 12px; }
-    </style>
+<style>
+    .main {background-color: #FAFAFA;}
+    .block-container {padding-top: 2rem;}
+    
+    /* Soft cards */
+    .stCard, div[data-testid="stExpander"] {
+        background-color: #FFFFFF;
+        border-radius: 18px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.04);
+        border: 1px solid rgba(0,0,0,0.06);
+    }
+    
+    /* Gradient buttons */
+    .stButton>button {
+        background: linear-gradient(135deg, #0071E3, #4A9EFF);
+        color: white;
+        border-radius: 9999px;
+        font-weight: 700;
+        border: none;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 0 4px 14px rgba(0,113,227,0.3);
+    }
+    .stButton>button:hover {
+        transform: scale(1.03);
+        box-shadow: 0 8px 20px rgba(0,113,227,0.35);
+        filter: brightness(1.08);
+    }
+    
+    .metric-label {font-size:13px; font-weight:600; letter-spacing:0.8px; text-transform:uppercase; color:#86868B;}
+    .green {color:#34C759;}
+    .red {color:#FF3B30;}
+    .gold {color:#FF9500;}
+</style>
 """, unsafe_allow_html=True)
 
-DATA_FILE = Path("wheelos_data.json")
-KEY_FILE = Path("finnhub_key.json")
-
-def load_persistent_data():
-    if DATA_FILE.exists():
-        try:
-            with open(DATA_FILE, "r") as f:
-                data = json.load(f)
-            st.session_state.trades = data.get("trades", [])
-            st.session_state.held_shares = data.get("held_shares", [])
-            st.session_state.leaps = data.get("leaps", [])
-            st.session_state.leap_fund = data.get("leap_fund", 0.0)
-            st.session_state.journal = data.get("journal", [])
-        except:
-            pass
-
-def save_persistent_data():
-    data = {
-        "trades": st.session_state.get("trades", []),
-        "held_shares": st.session_state.get("held_shares", []),
-        "leaps": st.session_state.get("leaps", []),
-        "leap_fund": st.session_state.get("leap_fund", 0.0),
-        "journal": st.session_state.get("journal", [])
-    }
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f)
-
-# Load API Key
+# ==================== SESSION STATE ====================
 if 'finnhub_key' not in st.session_state:
     st.session_state.finnhub_key = st.secrets.get("finnhub", {}).get("key", "")
-    if not st.session_state.finnhub_key and KEY_FILE.exists():
-        try:
-            with open(KEY_FILE, "r") as f:
-                saved = json.load(f)
-                st.session_state.finnhub_key = saved.get("key", "")
-        except:
-            pass
+if 'trades' not in st.session_state:
+    st.session_state.trades = []
+if 'leaps' not in st.session_state:
+    st.session_state.leaps = []
+if 'leap_fund' not in st.session_state:
+    st.session_state.leap_fund = 0.0
+if 'market_data' not in st.session_state:
+    st.session_state.market_data = {}
+if 'chart_data' not in st.session_state:
+    st.session_state.chart_data = {}
+if 'tickers' not in st.session_state:
+    st.session_state.tickers = ["TSLL", "SOXL", "TQQQ"]
+if 'capital' not in st.session_state:
+    st.session_state.capital = 20000
+if 'journal' not in st.session_state:
+    st.session_state.journal = []
 
-# Session State
-if 'trades' not in st.session_state: st.session_state.trades = []
-if 'held_shares' not in st.session_state: st.session_state.held_shares = []
-if 'leaps' not in st.session_state: st.session_state.leaps = []
-if 'leap_fund' not in st.session_state: st.session_state.leap_fund = 0.0
-if 'market_data' not in st.session_state: st.session_state.market_data = {}
-if 'tickers' not in st.session_state: st.session_state.tickers = ["TSLL", "SOXL", "TQQQ"]
-if 'capital' not in st.session_state: st.session_state.capital = 20000
-if 'journal' not in st.session_state: st.session_state.journal = []
-if 'vix' not in st.session_state: st.session_state.vix = 20.0
-
-load_persistent_data()
-
-RED_THRESHOLD = -1.5
-GREEN_THRESHOLD = 5.0
 VIX_LIMIT = 25
+MOVE_PCT = 5
 MAX_CALLS_PER_MIN = 50
 
-# Finnhub Helpers
+MAIN_TICKER_MAP = {"TQQQ": "QQQ", "SOXL": "SOXX", "TSLL": "TSLA", "QQQ": "QQQ", "SPY": "SPY"}
+
+# ==================== FINNHUB HELPERS ====================
 def fetch_quote(sym):
     if not st.session_state.finnhub_key: return None
     try:
@@ -92,81 +88,57 @@ def fetch_candles(sym):
         if data.get("s") == "ok":
             return pd.DataFrame({
                 "time": pd.to_datetime(data["t"], unit="s").dt.strftime("%Y-%m-%d"),
-                "open": data["o"], "high": data["h"], "low": data["l"], "close": data["c"],
-                "volume": data.get("v", [0] * len(data["c"]))
+                "open": data["o"], "high": data["h"], "low": data["l"], "close": data["c"]
             })
     except: pass
     return None
-
-def fetch_options_chain(sym):
-    if not st.session_state.finnhub_key: return None
-    try:
-        r = requests.get(f"https://finnhub.io/api/v1/stock/option?symbol={sym}&token={st.session_state.finnhub_key}", timeout=10)
-        data = r.json()
-        return data.get("data", []) if isinstance(data, dict) else None
-    except: return None
 
 def calc_rv(df):
     if df is None or len(df) < 5: return None
     returns = df["close"].pct_change().dropna()
     return round(returns.std() * (252 ** 0.5) * 100, 1)
 
-def calc_rsi(df, period=14):
-    if df is None or len(df) < period + 1: return None
-    delta = df["close"].diff()
-    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return round(rsi.iloc[-1], 1)
+def next_expiry(days=30):
+    target = datetime.now() + timedelta(days=days)
+    d = datetime(target.year, target.month, 1)
+    fridays = []
+    while d.month == target.month:
+        if d.weekday() == 4: fridays.append(d)
+        d += timedelta(days=1)
+    if len(fridays) >= 3: return fridays[2]
+    return target + timedelta(days=30)
 
 def safe_batch_update(tickers):
     updated = 0
-    vix_q = fetch_quote("VIX")
-    if vix_q and vix_q.get("c"):
-        st.session_state.vix = round(vix_q["c"], 2)
-        updated += 1
     for sym in tickers:
-        if updated >= MAX_CALLS_PER_MIN: break
+        if updated >= MAX_CALLS_PER_MIN:
+            st.warning(f"Reached safe limit ({MAX_CALLS_PER_MIN}/min). Remaining updates will run next minute.")
+            break
         q = fetch_quote(sym)
         if q and q.get("c"):
             df = fetch_candles(sym)
             rv = calc_rv(df)
-            rsi = calc_rsi(df)
-            volume = int(df["volume"].iloc[-1]) if df is not None and len(df) > 0 else None
             st.session_state.market_data[sym] = {
                 "price": round(q["c"], 2),
                 "change": round(q.get("dp", 0), 2),
-                "rv": rv,
-                "rsi": rsi,
-                "volume": volume
+                "rv": rv
             }
             updated += 2
         time.sleep(1.2)
 
-# First-time setup
+# ==================== FULL SCREEN SETUP ====================
 if not st.session_state.finnhub_key:
     st.title("Welcome to WheelOS")
     st.markdown("### First Time Setup")
     st.info("Get your free Finnhub API key at [finnhub.io](https://finnhub.io) → Dashboard → API Key")
     key = st.text_input("Paste your Finnhub API Key", type="password")
-    col1, col2 = st.columns([1,1])
-    with col1:
-        if st.button("Save & Launch App", type="primary"):
-            if key.strip():
-                st.session_state.finnhub_key = key.strip()
-                with open(KEY_FILE, "w") as f:
-                    json.dump({"key": key.strip()}, f)
-                st.success("Key saved!")
-                st.rerun()
-    with col2:
-        if st.button("💾 Save Permanently"):
-            if key.strip():
-                st.session_state.finnhub_key = key.strip()
-                with open(KEY_FILE, "w") as f:
-                    json.dump({"key": key.strip()}, f)
-                st.success("Key saved permanently")
-                st.rerun()
+    if st.button("Save & Launch App", type="primary"):
+        if key.strip():
+            st.session_state.finnhub_key = key.strip()
+            st.success("Key saved! Loading app...")
+            st.rerun()
+        else:
+            st.error("Please enter a valid key")
     st.stop()
 
 # Sidebar
@@ -175,17 +147,15 @@ with st.sidebar:
     st.success("Finnhub connected")
     if st.button("Reset Finnhub Key"):
         st.session_state.finnhub_key = ""
-        if KEY_FILE.exists():
-            KEY_FILE.unlink()
         st.rerun()
 
 # Tabs
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "🔁 CSP / Wheel Trades", "🚀 LEAP Trades", "📈 Super Chart", "📅 Economic Calendar", "⚙️ Settings"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "🔁 CSP Trades", "🚀 LEAP Trades", "📈 Super Chart", "📅 Calendar", "⚙️ Settings"])
 
 with tab1:
     st.subheader("Matt’s Profit Recycling Loop")
     st.info("CSP on red days → Close at 50% → 50% income, 50% to LEAP fund (house money only)")
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4 = st.columns(4)
     with col1: st.metric("House Money", f"${st.session_state.leap_fund:,.0f}")
     with col2: 
         closed = [t for t in st.session_state.trades if t.get("status") == "closed"]
@@ -197,8 +167,6 @@ with tab1:
     with col4:
         avg_days = round(sum(t.get("days_active", 0) for t in closed) / len(closed), 1) if closed else 0
         st.metric("Avg Days to Close", f"{avg_days} days")
-    with col5:
-        st.metric("VIX", f"{st.session_state.vix:.1f}")
 
     if st.button("🔄 Safe Refresh (≤50 calls/min)"):
         safe_batch_update(st.session_state.tickers)
@@ -208,316 +176,151 @@ with tab1:
     if st.session_state.market_data:
         st.dataframe(pd.DataFrame.from_dict(st.session_state.market_data, orient="index"), use_container_width=True)
 
-with tab2:
-    st.subheader("Wheel Trades • Red Day CSP Put | Green Day Covered Call")
+with tab2:  # CSP Trades - Color-coded buttons
+    st.subheader("CSP Trades • Red Day Sell Put / Green Day Sell Call")
     for ticker in st.session_state.tickers:
         d = st.session_state.market_data.get(ticker, {})
         price = d.get("price")
         rv = d.get("rv")
-        rsi = d.get("rsi")
-        volume = d.get("volume")
-        if not price:
+        if not price: 
             st.write(f"Waiting for data on {ticker}...")
             continue
 
         chg = d.get("change", 0)
-        has_held = any(h['ticker'] == ticker for h in st.session_state.held_shares)
-
         signal = "NO TRADE"
-        css_class = "gray-expander"
         button_type = "secondary"
-        is_put = True
 
-        if st.session_state.vix >= VIX_LIMIT:
-            signal = f"NO TRADE (VIX HIGH ≥{VIX_LIMIT})"
-        elif (rsi and rsi > 60) or (rv is not None and rv < 50):
-            signal = "NO TRADE (RSI >60 or Low IV)"
-        elif chg <= RED_THRESHOLD:
-            signal = f"SELL CSP PUT (Red Day {chg:.1f}%)"
-            css_class = "red-expander"
+        if float(st.session_state.get("vix") or 0) >= VIX_LIMIT:
+            signal = "NO TRADE (VIX HIGH)"
+        elif chg <= -MOVE_PCT:
+            signal = "SELL PUT (Red Day >5%)"
             button_type = "primary"
-            is_put = True
-        elif chg >= GREEN_THRESHOLD and has_held:
-            signal = f"SELL COVERED CALL (Green Day {chg:.1f}%)"
-            css_class = "green-expander"
+        elif chg >= MOVE_PCT:
+            signal = "SELL CALL (Green Day >5%)"
             button_type = "primary"
-            is_put = False
 
-        st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
-        with st.expander(f"{ticker} — **{signal}**", expanded=False):
-            st.markdown(f"<h4 style='margin:0'>{signal}</h4>", unsafe_allow_html=True)
+        with st.expander(f"{ticker} — **{signal}**"):
+            st.write(f"Price: **${price}** | Change: **{chg}%** | RV: **{rv if rv else 'Not loaded yet'}**")
+            if not rv:
+                st.warning("RV data not loaded yet – trading based on price action only")
 
-            options_raw = fetch_options_chain(ticker)
-            if options_raw:
-                today = datetime.now().date()
-                valid = [c for c in options_raw if 'expiry' in c]
-                expiries = {}
-                for c in valid:
-                    exp_date = datetime.strptime(c['expiry'], "%Y-%m-%d").date()
-                    dte = (exp_date - today).days
-                    if dte > 0:
-                        expiries.setdefault(dte, []).append(c)
-                if expiries:
-                    closest_dte = min(expiries.keys(), key=lambda d: abs(d - 30))
-                    chain = expiries[closest_dte]
-                    otm_list = [c for c in chain if c.get('putCall') == ('P' if is_put else 'C')]
-                    otm = min(otm_list, key=lambda c: abs(c['strike'] - price * (0.9 if is_put else 1.1))) if otm_list else None
-                    if otm:
-                        strike = otm['strike']
-                        premium = round((otm.get('bid',0) + otm.get('ask',0))/2, 2)
-                        iv = otm.get('iv') or (rv or "—")
-                        dte_val = closest_dte
-                        expiry = chain[0]['expiry']
-                        source = "✅ REAL Finnhub"
-                    else:
-                        st.warning("No suitable real option found for this direction")
-                        st.markdown('</div>', unsafe_allow_html=True)
-                        continue
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                if chg <= -MOVE_PCT:
+                    if st.button(f"Log Sell Put on {ticker}", key=f"put_{ticker}", type=button_type):
+                        expiry = next_expiry()
+                        st.session_state.trades.append({
+                            "id": int(time.time()), "type":"CSP Put", "ticker":ticker, "strike":round(price*0.90,2),
+                            "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium": "Real-time", "status":"open", "pnl":0
+                        })
+                        st.success("Sell Put logged")
+                        st.rerun()
                 else:
-                    st.warning("No 30 DTE options chain available from Finnhub for this ticker")
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    continue
-            else:
-                st.warning("Options chain unavailable from Finnhub for this ticker (free tier limitation common for leveraged ETFs)")
-                st.markdown('</div>', unsafe_allow_html=True)
-                continue
+                    st.button(f"Log Sell Put on {ticker}", disabled=True, key=f"put_disabled_{ticker}")
 
-            cols = st.columns([2,2,2,2])
-            with cols[0]:
-                st.metric("Price", f"${price:,.2f}")
-                st.metric("Day Change", f"{chg}%")
-            with cols[1]:
-                st.metric("Strike", f"${strike}")
-                st.metric("Premium", f"${premium}")
-            with cols[2]:
-                st.metric("Premium %", f"{round((premium / price)*100, 1)}%")
-                st.metric("IV", f"{iv}%")
-            with cols[3]:
-                st.metric("RSI", f"{rsi if rsi else '—'}")
-                st.metric("Volume", f"{volume:,.0f}" if volume else "—")
-            st.caption(f"**DTE:** {dte_val} days • Expiry: {expiry} • {source}")
+            with col_btn2:
+                if chg >= MOVE_PCT:
+                    if st.button(f"Log Sell Call on {ticker}", key=f"call_{ticker}", type=button_type):
+                        expiry = next_expiry()
+                        st.session_state.trades.append({
+                            "id": int(time.time()), "type":"CSP Call", "ticker":ticker, "strike":round(price*1.10,2),
+                            "expiry":expiry.strftime("%Y-%m-%d"), "entry_premium": "Real-time", "status":"open", "pnl":0
+                        })
+                        st.success("Sell Call logged")
+                        st.rerun()
+                else:
+                    st.button(f"Log Sell Call on {ticker}", disabled=True, key=f"call_disabled_{ticker}")
 
-            max_cash = st.session_state.capital * 0.25
-            suggested_contracts = int(max_cash // (price * 100)) if price else 0
-            st.caption(f"**Suggested size**: ~{suggested_contracts} contracts")
-
-            if (chg <= RED_THRESHOLD or (chg >= GREEN_THRESHOLD and has_held)) and st.session_state.vix < VIX_LIMIT:
-                btn_text = f"Log {'CSP Put' if is_put else 'Covered Call'} on {ticker}"
-                if st.button(btn_text, key=f"trade_{ticker}_{'put' if is_put else 'call'}", type=button_type):
-                    expiry_dt = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
-                    trade_type = "CSP Put" if is_put else "Covered Call"
-                    st.session_state.trades.append({
-                        "id": int(time.time()), "type": trade_type, "ticker": ticker,
-                        "strike": strike, "expiry": expiry_dt, "entry_premium": premium,
-                        "status": "open", "pnl": 0, "contracts": suggested_contracts
-                    })
-                    save_persistent_data()
-                    st.success(f"{trade_type} logged")
-                    st.rerun()
-            else:
-                st.button(f"Log {'CSP Put' if is_put else 'Covered Call'} on {ticker}", disabled=True, key=f"disabled_{ticker}")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    # Open trades and held shares
-    st.subheader("Open Wheel Trades")
+    st.subheader("Open CSP Trades")
     for t in st.session_state.trades:
         if t.get("status") == "open":
             with st.expander(f"{t['ticker']} {t['type']} @ ${t['strike']}"):
                 st.write(f"Entry Premium: ${t.get('entry_premium','—')}")
-                col_close, col_assign = st.columns(2)
-                with col_close:
-                    if st.button("Close at 50% Profit", key=f"close_{t['id']}"):
-                        profit = round(t["entry_premium"] * 0.5, 2)
-                        t["pnl"] = profit
-                        t["status"] = "closed"
-                        t["closed_date"] = datetime.now().strftime("%Y-%m-%d")
-                        st.session_state.leap_fund += profit * 0.5
-                        st.session_state.journal.append({"date": datetime.now().strftime("%Y-%m-%d %H:%M"), "ticker": t["ticker"], "type": t["type"], "action": "Closed at 50%", "profit": profit, "note": "Profit recycled"})
-                        save_persistent_data()
-                        st.success(f"Closed! ${profit} → ${profit*0.5:.0f} to House Money")
-                        st.rerun()
-                with col_assign:
-                    if t["type"] == "CSP Put":
-                        if st.button("🔄 Simulate Assignment", key=f"assign_{t['id']}"):
-                            shares = t.get("contracts", 1) * 100
-                            cost_basis = t["strike"] - t["entry_premium"]
-                            st.session_state.held_shares.append({"ticker": t["ticker"], "shares": shares, "cost_basis": round(cost_basis, 2), "entry_date": datetime.now().strftime("%Y-%m-%d")})
-                            t["status"] = "assigned"
-                            save_persistent_data()
-                            st.success(f"Assigned! {shares} shares ready")
-                            st.rerun()
+                if st.button("Close at 50% Profit", key=t["id"]):
+                    profit = 0  # Real premium tracking would come from manual input or external API later
+                    t["pnl"] = profit
+                    t["status"] = "closed"
+                    t["closed_date"] = datetime.now().strftime("%Y-%m-%d")
+                    st.session_state.leap_fund += profit * 0.5
+                    
+                    st.session_state.journal.append({
+                        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "ticker": t["ticker"],
+                        "type": t["type"],
+                        "action": "Closed at 50%",
+                        "profit": profit,
+                        "note": "Profit recycled to LEAP fund"
+                    })
+                    
+                    st.success(f"Closed! Profit recorded and added to House Money")
+                    st.rerun()
 
-    st.subheader("Held Shares")
-    for idx, h in enumerate(st.session_state.held_shares):
-        with st.expander(f"📌 {h['ticker']} – {h['shares']} shares"):
-            if st.button("Simulate Call-Away", key=f"callaway_{idx}"):
-                st.session_state.held_shares.pop(idx)
-                save_persistent_data()
-                st.success("Wheel complete!")
-                st.rerun()
-
-    # Options Matrix - Real data only
-    st.subheader("📊 Options Matrix (30 DTE) – Real Finnhub Data Only")
-    matrix_ticker = st.text_input("Enter any ticker (e.g. AAPL, NVDA, QQQ, SPY)", value="QQQ", key="matrix_input").upper().strip()
-    if st.button("Load Real Options Matrix", type="primary"):
-        price_data = fetch_quote(matrix_ticker)
-        price = price_data["c"] if price_data and price_data.get("c") else 0
-        if not price:
-            st.error("Ticker not found or no price data from Finnhub")
-            st.stop()
-
-        options_raw = fetch_options_chain(matrix_ticker)
-        if not options_raw or len(options_raw) == 0:
-            st.error(f"No options chain data available from Finnhub for **{matrix_ticker}**.\n\nFree tier often returns empty data for leveraged ETFs. Try **QQQ**, **SPY**, **AAPL**, or **NVDA** instead.")
-            st.stop()
-
-        rows = []
-        today = datetime.now().date()
-        valid = [c for c in options_raw if 'expiry' in c]
-        expiries = {}
-        for c in valid:
-            exp_date = datetime.strptime(c['expiry'], "%Y-%m-%d").date()
-            dte = (exp_date - today).days
-            if dte > 0:
-                expiries.setdefault(dte, []).append(c)
-        if not expiries:
-            st.error("No valid expiry dates found in options chain")
-            st.stop()
-
-        closest_dte = min(expiries.keys(), key=lambda d: abs(d - 30))
-        chain = expiries[closest_dte]
-        for c in chain:
-            strike = c['strike']
-            prem = round((c.get('bid',0) + c.get('ask',0))/2, 2)
-            iv = c.get('iv') or "—"
-            opt_type = "Put" if c.get('putCall') == 'P' else "Call"
-            pnl = prem if (opt_type == "Put" and price > strike) or (opt_type == "Call" and price < strike) else prem - abs(price - strike)
-            profit_pct = (pnl / price) * 100 if price else 0
-            rows.append({"Type": opt_type, "Strike": strike, "Premium": prem, "IV %": iv, "Profit %": round(profit_pct, 1)})
-
-        df_matrix = pd.DataFrame(rows).sort_values("Strike")
-        def color_profit(val):
-            if val > 2: return 'background-color: #2e7d32; color: white'
-            if val > 0: return 'background-color: #81c784; color: white'
-            if val == 0: return 'background-color: #f5f5f5'
-            return 'background-color: #ef5350; color: white'
-        styled = df_matrix.style.map(color_profit, subset=['Profit %'])
-        st.dataframe(styled, use_container_width=True, hide_index=True)
-        st.caption("Profit % assumes stock price unchanged at expiry • Green = OTM profit • Red = ITM loss")
-
-with tab3:
-    st.subheader("🚀 LEAP Calls • Any Ticker (360+ DTE)")
-    leap_ticker_input = st.text_input("Enter any ticker for LEAP (e.g. NVDA, AAPL, QQQ)", value="QQQ", key="leap_input").upper().strip()
-    if st.button("Load Real LEAP Data (360+ DTE)"):
-        price_data = fetch_quote(leap_ticker_input)
-        price = price_data["c"] if price_data and price_data.get("c") else 0
-        if not price:
-            st.error("Ticker not found")
-            st.stop()
-
-        options_raw = fetch_options_chain(leap_ticker_input)
-        leap_rsi = calc_rsi(fetch_candles(leap_ticker_input))
-        if not options_raw or len(options_raw) == 0:
-            st.error(f"No options chain data from Finnhub for **{leap_ticker_input}**. Try QQQ, SPY, AAPL or NVDA.")
-            st.stop()
-
-        today = datetime.now().date()
-        valid = [c for c in options_raw if 'expiry' in c]
-        expiries = {}
-        for c in valid:
-            exp_date = datetime.strptime(c['expiry'], "%Y-%m-%d").date()
-            dte = (exp_date - today).days
-            if dte >= 360:
-                expiries.setdefault(dte, []).append(c)
-        if not expiries:
-            st.error("No 360+ DTE options available from Finnhub for this ticker")
-            st.stop()
-
-        closest_dte = min(expiries.keys())
-        chain = expiries[closest_dte]
-        calls = [c for c in chain if c.get('putCall') == 'C']
-        if not calls:
-            st.error("No call options found in 360+ DTE chain")
-            st.stop()
-
-        otm_call = min(calls, key=lambda c: abs(c['strike'] - price*1.10))
-        strike = otm_call['strike']
-        premium = round((otm_call.get('bid',0) + otm_call.get('ask',0))/2, 2)
-        iv = otm_call.get('iv') or "—"
-        expiry = chain[0]['expiry']
-        st.success(f"✅ Real LEAP Call for {leap_ticker_input}")
-        st.metric("Price", f"${price:,.2f}")
-        st.metric("Strike (≈10% OTM)", f"${strike}")
-        st.metric("Premium", f"${premium}")
-        st.metric("IV", f"{iv}%")
-        st.metric("DTE", f"{closest_dte} days")
-        st.metric("Expiry", expiry)
-        st.metric("RSI", f"{leap_rsi if leap_rsi else '—'}")
-        if st.button("Add this LEAP (house money only)", key="add_leap"):
-            if st.session_state.leap_fund >= 1000:
-                st.session_state.leaps.append({
-                    "id": int(time.time()),
-                    "ticker": leap_ticker_input,
-                    "cost": premium * 100,
-                    "current_val": premium * 100,
-                    "contracts": 1,
-                    "expiry": expiry
-                })
-                st.session_state.leap_fund -= premium * 100
-                save_persistent_data()
-                st.success("LEAP added!")
-                st.rerun()
-            else:
-                st.error("Not enough house money")
+with tab3:  # LEAP Trades
+    st.subheader("LEAP Calls • House Money Only")
+    st.metric("House Money Available", f"${st.session_state.leap_fund:,.0f}")
+    leap_ticker = st.selectbox("LEAP Ticker", st.session_state.tickers, key="leap_sel")
+    if st.button("Add LEAP (360+ DTE)"):
+        if st.session_state.leap_fund >= 1000:
+            st.session_state.leaps.append({
+                "id": int(time.time()), "ticker": leap_ticker, "cost": 1200, "current_val": 1200, "contracts": 1,
+                "expiry": (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
+            })
+            st.session_state.leap_fund -= 1200
+            st.success("LEAP added with house money")
+            st.rerun()
+        else:
+            st.error("Not enough house money")
 
     st.subheader("Your LEAP Positions")
     for l in st.session_state.leaps:
         with st.expander(f"{l['ticker']} LEAP"):
             st.write(f"Cost: ${l['cost']} | Current: ${l['current_val']} | Expiry: {l['expiry']}")
+            profit_pct = ((l['current_val'] - l['cost']) / l['cost']) * 100
+            if profit_pct > 100:
+                st.success("🎯 >100% profit – Consider selling!")
             if st.button("Sell Half & Recycle", key=l["id"]):
                 st.session_state.leap_fund += l["cost"] * 0.8
                 l["contracts"] = max(0, l["contracts"] - 1)
-                save_persistent_data()
-                st.success("Half sold")
+                st.success("Half sold • Profits added to House Money")
                 st.rerun()
 
-with tab4:
+with tab4:  # Super Chart
     st.subheader("TradingView Super Chart + RSI")
     ticker = st.selectbox("Select Leveraged Ticker", st.session_state.tickers, key="superchart_ticker")
+    main_ticker = MAIN_TICKER_MAP.get(ticker, ticker)
+    st.write(f"**Showing:** {ticker} (with Volume + RSI) + **{main_ticker}** (overlay)")
+
     tv_html = f"""
-    <div style="width:100%; height:620px; position:relative; margin:0 auto;">
-      <div id="tradingview_widget" style="width:100%; height:100%;"></div>
+    <div class="tradingview-widget-container">
+      <div id="tradingview_{ticker}"></div>
       <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
       <script type="text/javascript">
-        new TradingView.widget({{
-          "autosize": true,
-          "symbol": "{ticker}",
-          "interval": "D",
-          "timezone": "Etc/UTC",
-          "theme": "light",
-          "style": "1",
-          "locale": "en",
-          "toolbar_bg": "#f1f3f6",
-          "enable_publishing": false,
-          "hide_side_toolbar": false,
-          "allow_symbol_change": true,
-          "studies": ["RSI@tv-basicstudies"],
-          "container_id": "tradingview_widget"
-        }});
+      new TradingView.widget({{
+        "width": "100%",
+        "height": 650,
+        "symbol": "{ticker}",
+        "interval": "D",
+        "timezone": "Etc/UTC",
+        "theme": "light",
+        "style": "1",
+        "locale": "en",
+        "toolbar_bg": "#f1f3f6",
+        "enable_publishing": false,
+        "allow_symbol_change": true,
+        "container_id": "tradingview_{ticker}",
+        "studies": ["Volume@tv-basicstudies", "RSI@tv-basicstudies"],
+        "show_volume": true,
+        "overrides": {{ "mainSeriesProperties.showPriceLine": true }},
+        "comparisons": [{{"symbol": "{main_ticker}"}}]
+      }});
       </script>
     </div>
     """
-    st.components.v1.html(tv_html, height=650, scrolling=False)
+    st.components.v1.html(tv_html, height=680, scrolling=True)
 
 with tab5:
-    st.subheader("📅 Economic Calendar")
-    st.info("Upcoming major events (placeholder - real data can be added via API later)")
-    calendar_data = pd.DataFrame({
-        "Date": ["2026-04-24", "2026-04-25", "2026-04-30"],
-        "Event": ["GDP Flash Estimate (US)", "FOMC Rate Decision", "Non-Farm Payrolls"],
-        "Impact": ["High", "Very High", "Very High"]
-    })
-    st.dataframe(calendar_data, use_container_width=True)
+    st.subheader("📅 Upcoming Economic Events")
+    st.info("Avoid new trades on high VIX (≥25) or major events")
 
 with tab6:
     st.subheader("⚙️ Settings")
@@ -530,16 +333,16 @@ with tab6:
         st.success(f"Capital set to ${st.session_state.capital:,.0f}")
 
     st.divider()
-    st.write("**Finnhub API Key**")
-    st.success("✅ Key is saved permanently")
-    new_key = st.text_input("Update Finnhub API Key", type="password")
-    if st.button("Update & Save"):
-        if new_key.strip():
-            st.session_state.finnhub_key = new_key.strip()
-            with open(KEY_FILE, "w") as f:
-                json.dump({"key": new_key.strip()}, f)
-            st.success("Key updated and saved")
-            st.rerun()
+    st.write("**House Money**")
+    st.metric("Current House Money", f"${st.session_state.leap_fund:,.0f}")
+
+    st.divider()
+    st.write("**Journal Entries** (Closed Trades)")
+    if st.session_state.journal:
+        journal_df = pd.DataFrame(st.session_state.journal)
+        st.dataframe(journal_df, use_container_width=True)
+    else:
+        st.info("No closed trades yet.")
 
     st.divider()
     st.write("**Watched Tickers**")
@@ -554,6 +357,7 @@ with tab6:
                     st.rerun()
                 else:
                     st.error("Keep at least one ticker")
+
     st.divider()
     st.write("**Add New Ticker**")
     new_t = st.text_input("Ticker Symbol").upper().strip()
@@ -569,7 +373,7 @@ with tab6:
         else:
             st.warning("Already watching or empty input")
 
-# Auto-refresh
+# Auto-refresh every 15 minutes
 if 'last_refresh' not in st.session_state:
     st.session_state.last_refresh = time.time()
 if time.time() - st.session_state.last_refresh > 900:
@@ -581,4 +385,4 @@ if st.button("🔄 Safe Full Refresh (≤50 calls/min)"):
     st.success("Safe batch update completed")
     st.rerun()
 
-st.caption("WheelOS • Real Finnhub Data Only • No Estimates")
+st.caption("WheelOS • Matt @MarketMovesMatt Strategy • Real-time Finnhub + TradingView")
