@@ -1,11 +1,11 @@
 # app.py
 
-import streamlit as st
-import pandas as pd
-import requests
 import time
 from datetime import datetime, timedelta
-from streamlit_lightweight_charts import renderLightweightCharts
+
+import pandas as pd
+import requests
+import streamlit as st
 
 # ==================== PAGE CONFIG ====================
 
@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# ==================== IOS / APPLE MINIMALIST THEME ====================
+# ==================== IOS / APPLE MINIMALIST THEME + BANNERS ====================
 
 APPLE_CSS = """
 <style>
@@ -24,13 +24,13 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
 }
 
-/* Push content down so tabs are fully visible under Streamlit toolbar */
+/* Main container padding */
 .block-container {
     padding-top: 3.5rem !important;
     padding-bottom: 2rem;
 }
 
-/* General buttons */
+/* Buttons */
 div.stButton > button {
     border-radius: 999px;
     border: none;
@@ -41,25 +41,21 @@ div.stButton > button {
     color: #FFFFFF !important;
 }
 
-/* Primary button (systemGreen) */
 button[kind="primary"] {
     background: linear-gradient(135deg, #34C759, #30D158) !important;
     color: #FFFFFF !important;
 }
 
-/* Secondary button (systemGray) */
 button[kind="secondary"] {
     background: linear-gradient(135deg, #8E8E93, #AEAEB2) !important;
     color: #FFFFFF !important;
 }
 
-/* Disabled buttons */
 button[disabled] {
     opacity: 0.45 !important;
     cursor: not-allowed !important;
 }
 
-/* Hover effect */
 div.stButton > button:hover {
     transform: translateY(-1px) scale(1.01);
     box-shadow: 0 12px 26px rgba(0,0,0,0.08);
@@ -74,7 +70,6 @@ div.stButton > button:hover {
     border: 1px solid rgba(148,163,184,0.18);
 }
 
-/* Metric cards */
 .metric-card {
     background: #FFFFFF;
     border-radius: 18px;
@@ -83,18 +78,38 @@ div.stButton > button:hover {
     border: 1px solid rgba(148,163,184,0.16);
 }
 
-/* Soft red / green badges if needed */
-.soft-red {
-    background: linear-gradient(135deg, #FF3B30, #FF453A);
-    color: #FFFFFF !important;
+/* Ticker banners (C1 + R1 + S1) */
+.ticker-banner {
+    width: 100%;
+    padding: 0.65rem 1.0rem;
+    border-radius: 14px;
+    color: #FFFFFF;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-sizing: border-box;
+    font-size: 0.95rem;
 }
-.soft-green {
-    background: linear-gradient(135deg, #34C759, #30D158);
-    color: #FFFFFF !important;
+
+.ticker-banner-red {
+    background: #FF3B30;
 }
-.soft-gray {
-    background: linear-gradient(135deg, #8E8E93, #AEAEB2);
-    color: #FFFFFF !important;
+
+.ticker-banner-green {
+    background: #34C759;
+}
+
+.ticker-banner-gray {
+    background: #8E8E93;
+}
+
+/* Small right-side label in banner */
+.ticker-banner-label {
+    font-size: 0.8rem;
+    opacity: 0.9;
 }
 </style>
 """
@@ -115,8 +130,6 @@ MAIN_TICKER_MAP = {
     "SPY": "SPY",
 }
 
-CORE_LEVERAGED = ["TSLL", "SOXL", "TQQQ", "NVDL"]
-
 # ==================== SESSION STATE ====================
 
 if "finnhub_key" not in st.session_state:
@@ -133,9 +146,6 @@ if "leap_fund" not in st.session_state:
 
 if "market_data" not in st.session_state:
     st.session_state.market_data = {}
-
-if "chart_data" not in st.session_state:
-    st.session_state.chart_data = {}
 
 if "tickers" not in st.session_state:
     st.session_state.tickers = ["TSLL", "SOXL", "TQQQ"]
@@ -154,6 +164,10 @@ if "econ_events" not in st.session_state:
 
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
+
+# Ownership dictionary: ticker → True/False (B3)
+if "ownership" not in st.session_state:
+    st.session_state.ownership = {}
 
 # ==================== FINNHUB HELPERS ====================
 
@@ -174,10 +188,12 @@ def _finnhub_get(path: str, params: dict | None = None):
 
 
 def fetch_quote(sym: str):
+    """Fetch latest quote for a symbol."""
     return _finnhub_get("/quote", {"symbol": sym})
 
 
 def fetch_candles(sym: str):
+    """Fetch ~40 days of daily candles for realized volatility."""
     to_ts = int(time.time())
     from_ts = to_ts - (40 * 86400)
     data = _finnhub_get(
@@ -195,11 +211,11 @@ def fetch_candles(sym: str):
             "close": data["c"],
         }
     )
-    df["time_str"] = df["time"].dt.strftime("%Y-%m-%d")
     return df
 
 
 def calc_rv(df: pd.DataFrame | None):
+    """Annualized realized volatility from daily closes."""
     if df is None or len(df) < 5:
         return None
     returns = df["close"].pct_change().dropna()
@@ -207,6 +223,7 @@ def calc_rv(df: pd.DataFrame | None):
 
 
 def fetch_vix():
+    """Fetch VIX index."""
     q = fetch_quote("^VIX")
     if q and q.get("c"):
         return round(q["c"], 2)
@@ -214,6 +231,7 @@ def fetch_vix():
 
 
 def fetch_economic_calendar(days_ahead: int = 7):
+    """Fetch upcoming economic events (high/medium impact)."""
     today = datetime.utcnow().date()
     end = today + timedelta(days=days_ahead)
     data = _finnhub_get(
@@ -230,6 +248,7 @@ def fetch_economic_calendar(days_ahead: int = 7):
 
 
 def fetch_options_chain(symbol: str):
+    """Fetch full options chain for a symbol."""
     data = _finnhub_get("/stock/option-chain", {"symbol": symbol})
     if not data:
         return None
@@ -237,6 +256,7 @@ def fetch_options_chain(symbol: str):
 
 
 def nearest_30d_expiry_from_chain(chain: dict):
+    """Pick expiry closest to 30 days out."""
     if not chain or "data" not in chain:
         return None
     expiries = set()
@@ -262,6 +282,7 @@ def nearest_30d_expiry_from_chain(chain: dict):
 
 
 def safe_batch_update(tickers):
+    """Rate-limited batch update of quotes + RV + VIX + econ calendar."""
     updated = 0
     for sym in tickers:
         if updated >= MAX_CALLS_PER_MIN:
@@ -287,11 +308,12 @@ def safe_batch_update(tickers):
 # ==================== FINNHUB KEY PERSISTENCE (QUERY PARAMS) ====================
 
 # Use URL query params as a simple browser-side persistence mechanism.
-# On first save, we store the key in the URL; on reload/redeploy, we read it back.
+# New Streamlit API: st.query_params (no experimental_get_query_params).
 
 if not st.session_state.finnhub_key:
-    if "fhk" in st.query_params and st.query_params["fhk"]:
-        st.session_state.finnhub_key = st.query_params["fhk"]
+    qp = st.query_params
+    if "fhk" in qp and qp["fhk"]:
+        st.session_state.finnhub_key = qp["fhk"]
 
 # ==================== FIRST-TIME FINNHUB SETUP ====================
 
@@ -304,8 +326,8 @@ if not st.session_state.finnhub_key:
     if st.button("Save & Launch App", type="primary"):
         if key.strip():
             st.session_state.finnhub_key = key.strip()
-            # Persist in URL query params so it survives refresh/redeploy
-            st.query_params["fhk"] = st.session_state.finnhub_key
+            qp = st.query_params
+            qp["fhk"] = st.session_state.finnhub_key
             st.success("Key saved! Loading app…")
             st.rerun()
         else:
@@ -339,7 +361,6 @@ with st.sidebar:
 
     if st.button("Reset Finnhub Key", type="secondary"):
         st.session_state.finnhub_key = ""
-        # Clear query param
         st.query_params.clear()
         st.rerun()
 
@@ -410,48 +431,12 @@ with tab1:
     else:
         st.info("Click **Safe Refresh** to load market data.")
 
-    st.markdown("---")
-    st.markdown("#### Graduation Progress")
-
-    num_csp_closed = len([t for t in closed if "CSP" in t.get("type", "")])
-    num_leaps = len(st.session_state.leaps)
-
-    if num_csp_closed < 5:
-        level = 1
-        label = "Level 1 — CSP Foundation"
-    elif num_csp_closed >= 5 and num_leaps == 0:
-        level = 2
-        label = "Level 2 — Add Leveraged ETFs"
-    elif num_leaps > 0 and num_csp_closed < 15:
-        level = 3
-        label = "Level 3 — Introduce LEAPs"
-    else:
-        level = 4
-        label = "Level 4 — Full Wheel (CSP → Assignment → Covered Calls)"
-
-    st.progress(level / 4.0)
-    st.write(label)
-
-    st.markdown("---")
-    st.markdown("#### Profit Recycling Visualization (Simple View)")
-    if closed:
-        income = sum(t.get("pnl", 0) * 0.5 for t in closed)
-        recycled = sum(t.get("pnl", 0) * 0.5 for t in closed)
-        pr_df = pd.DataFrame(
-            {
-                "Bucket": ["Income (50%)", "Recycled to LEAP Fund (50%)"],
-                "Amount": [income, recycled],
-            }
-        )
-        st.bar_chart(pr_df.set_index("Bucket"))
-    else:
-        st.info("Close some CSP trades at 50% profit to see the recycling chart.")
-
 # ==================== CSP & WHEEL TAB ====================
 
 with tab2:
     st.subheader("CSP Trades • Red Day Sell Put / Assignment → Covered Calls")
 
+    # Basic guardrails
     open_positions = [t for t in st.session_state.trades if t.get("status") == "open"]
     num_open = len(open_positions)
     cash_required = sum(
@@ -469,43 +454,70 @@ with tab2:
             f"Cash buffer below 30% (Current: {cash_ratio:.0%}). "
             "Consider closing or avoiding new positions."
         )
-
-    if len(st.session_state.tickers) > 5:
-        st.warning(
-            "You are watching more than 5 tickers. "
-            "Matt’s system prefers 3–5 core names."
-        )
-
     if st.session_state.vix is not None and st.session_state.vix >= VIX_LIMIT:
         st.error("VIX is elevated — new CSP/CC trades are paused per rules.")
 
+    today = datetime.utcnow().date()
+
+    # Per-ticker section
     for ticker in st.session_state.tickers:
+        # Ensure ownership key exists for every ticker (B3, all tickers)
+        if ticker not in st.session_state.ownership:
+            st.session_state.ownership[ticker] = False
+
         d = st.session_state.market_data.get(ticker, {})
         price = d.get("price")
         rv = d.get("rv")
-        chg = d.get("change", 0)
+        chg = d.get("change", 0.0)
 
         if not price:
             st.write(f"Waiting for data on {ticker}… (hit Safe Refresh)")
             continue
 
-        signal = "NO TRADE"
-        put_enabled = False
-        call_enabled = False
-
+        # Determine trade signal (red/green/neutral)
         if st.session_state.vix is not None and st.session_state.vix >= VIX_LIMIT:
             signal = "NO TRADE (VIX HIGH)"
+            banner_class = "ticker-banner-gray"
+            call_enabled = False
+            put_enabled = False
         elif chg <= -MOVE_PCT:
-            signal = "SELL PUT (Red Day ≤ -5%)"
+            signal = "SELL PUT (Red Day)"
+            banner_class = "ticker-banner-red"
             put_enabled = True
+            call_enabled = False
         elif chg >= MOVE_PCT:
-            signal = "SELL CALL (Green Day ≥ +5%)"
+            signal = "SELL CALL (Green Day)"
+            banner_class = "ticker-banner-green"
+            put_enabled = False
             call_enabled = True
+        else:
+            signal = "NO TRADE"
+            banner_class = "ticker-banner-gray"
+            put_enabled = False
+            call_enabled = False
 
-        expander_label = f"{ticker} — {signal}"
-        with st.expander(expander_label):
+        # Full-width iOS-style banner (C1 + R1 + S1)
+        banner_html = f"""
+        <div class="ticker-banner {banner_class}">
+            <div>{ticker} — {signal}</div>
+            <div class="ticker-banner-label">Δ {chg:.2f}% • ${price:.2f}</div>
+        </div>
+        """
+        st.markdown(banner_html, unsafe_allow_html=True)
+
+        # Ownership toggle (UI-A, O1) — per ticker, under banner
+        own_default = st.session_state.ownership.get(ticker, False)
+        own_checkbox = st.checkbox(
+            f"I own shares of {ticker}",
+            key=f"own_{ticker}",
+            value=own_default,
+        )
+        st.session_state.ownership[ticker] = own_checkbox  # sync to dict
+
+        # Expander with details + trade logging
+        with st.expander(f"{ticker} details"):
             st.write(
-                f"Price: **${price}** | Change: **{chg}%** | "
+                f"Price: **${price}** | Change: **{chg:.2f}%** | "
                 f"RV: **{rv if rv is not None else 'Not loaded yet'}**"
             )
             if rv is not None and rv < 50:
@@ -513,6 +525,7 @@ with tab2:
             elif rv is None:
                 st.warning("RV data not loaded yet – trading based on price action only.")
 
+            # Options chain preview (no auto premium)
             main_ticker = MAIN_TICKER_MAP.get(ticker, ticker)
             chain = fetch_options_chain(main_ticker)
             expiry_30 = nearest_30d_expiry_from_chain(chain)
@@ -582,6 +595,7 @@ with tab2:
 
             col_btn1, col_btn2 = st.columns(2)
 
+            # --- SELL CSP BUTTON (red day) ---
             with col_btn1:
                 disabled_put = (
                     not put_enabled
@@ -618,12 +632,9 @@ with tab2:
                         st.success("CSP Put logged (red day rule enforced).")
                         st.rerun()
 
+            # --- COVERED CALL BUTTON (green day, B3 ownership) ---
             with col_btn2:
-                # Determine if user owns shares for this ticker (manual or auto)
-                owns_shares = any(
-                    t.get("ticker") == ticker and t.get("assigned") is True
-                    for t in st.session_state.trades
-                )
+                owns_shares = st.session_state.ownership.get(ticker, False)
                 disabled_call = (
                     not call_enabled
                     or not owns_shares
@@ -653,46 +664,44 @@ with tab2:
                             "assigned": False,
                         }
                     )
-                    st.success("Covered Call logged (assignment → CC on green day).")
+                    st.success("Covered Call logged (ownership + green day).")
                     st.rerun()
 
     st.markdown("---")
     st.subheader("Open Wheel Positions")
 
-    today = datetime.utcnow().date()
-
+    # Auto-assignment + per-trade controls
     for t in st.session_state.trades:
         if t.get("status") != "open":
             continue
 
-        # ---------- AUTO-DETECT ASSIGNMENT FOR CSP ----------
+        # Auto-detect assignment for CSP near/past expiry (B3)
         try:
             expiry_date = datetime.strptime(t["expiry"], "%Y-%m-%d").date()
         except Exception:
             expiry_date = today
 
         if "CSP" in t["type"]:
-            # Near or past expiry
             if today >= expiry_date or (expiry_date - today).days <= 1:
                 md = st.session_state.market_data.get(t["ticker"], {})
                 price = md.get("price")
                 if price is not None and price < t["strike"]:
                     t["assigned"] = True
+                    # Auto-assign ownership at ticker level
+                    st.session_state.ownership[t["ticker"]] = True
 
         label = f"{t['ticker']} {t['type']} @ ${t['strike']} (exp {t['expiry']})"
         with st.expander(label):
             st.write(f"Entry Premium: **${t.get('entry_premium', '—')}**")
             st.write(f"Opened: {t.get('opened', '—')}")
-            st.write(f"Assigned / Own Shares: **{t.get('assigned', False)}**")
-
-            # Manual ownership toggle
-            own_key = f"own_{t['id']}"
-            manual_own = st.checkbox("I own shares for this ticker", key=own_key, value=t.get("assigned", False))
-            if manual_own and not t.get("assigned", False):
-                t["assigned"] = True
-                st.info("Marked as owning shares for this ticker (manual override).")
+            st.write(f"Assigned (trade-level): **{t.get('assigned', False)}**")
+            st.write(
+                f"Ticker Ownership (B3): **{st.session_state.ownership.get(t['ticker'], False)}**"
+            )
 
             col1, col2, col3 = st.columns(3)
+
+            # Close at 50% profit (CSP or CC)
             with col1:
                 if "CSP" in t["type"] or "Covered Call" in t["type"]:
                     if st.button("Close at 50% Profit", key=f"close50_{t['id']}"):
@@ -721,12 +730,14 @@ with tab2:
                         )
                         st.rerun()
 
+            # Explicit "Mark as Assigned" button (also sets ownership)
             with col2:
                 if "CSP" in t["type"] and not t.get("assigned", False):
                     if st.button(
                         "Mark as Assigned (Shares Received)", key=f"assign_{t['id']}"
                     ):
                         t["assigned"] = True
+                        st.session_state.ownership[t["ticker"]] = True
                         st.session_state.journal.append(
                             {
                                 "date": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
@@ -738,10 +749,11 @@ with tab2:
                             }
                         )
                         st.success(
-                            "Position marked as assigned. Look for green days to sell covered calls."
+                            "Position marked as assigned. Ownership updated for this ticker."
                         )
                         st.rerun()
 
+            # Manual close with custom P&L
             with col3:
                 if st.button("Manual Close (Custom P&L)", key=f"manual_{t['id']}"):
                     pnl = st.number_input(
@@ -850,7 +862,10 @@ with tab3:
                     f"Cost: **${l['cost']}** | Current: **${l['current_val']}** | "
                     f"Opened: {l.get('opened', '—')}"
                 )
-                profit_pct = ((l["current_val"] - l["cost"]) / l["cost"]) * 100
+                if l["cost"] > 0:
+                    profit_pct = ((l["current_val"] - l["cost"]) / l["cost"]) * 100
+                else:
+                    profit_pct = 0.0
                 st.write(f"Unrealized Return: **{profit_pct:.1f}%**")
 
                 if profit_pct >= 100:
@@ -910,13 +925,12 @@ with tab3:
 # ==================== SUPER CHART TAB ====================
 
 with tab4:
-    st.subheader("TradingView Super Chart + RSI")
+    st.subheader("TradingView Super Chart")
 
     ticker = st.selectbox(
-        "Select Leveraged Ticker", st.session_state.tickers, key="superchart_ticker"
+        "Select Ticker", st.session_state.tickers, key="superchart_ticker"
     )
-    main_ticker = MAIN_TICKER_MAP.get(ticker, ticker)
-    st.write(f"Showing: **{ticker}** (Volume + RSI) + **{main_ticker}** (overlay)")
+    st.write(f"Showing TradingView chart for **{ticker}**")
 
     tv_html = f"""
     <div class="tradingview-widget-container">
@@ -1034,6 +1048,8 @@ with tab6:
             if st.button("Remove", key=f"rem_{t}", type="secondary"):
                 if len(st.session_state.tickers) > 1:
                     st.session_state.tickers.remove(t)
+                    # Also clean up ownership entry
+                    st.session_state.ownership.pop(t, None)
                     st.success(f"Removed {t}")
                     st.rerun()
                 else:
@@ -1048,6 +1064,8 @@ with tab6:
             q = fetch_quote(new_t)
             if q and q.get("c"):
                 st.session_state.tickers.append(new_t)
+                # Initialize ownership for new ticker
+                st.session_state.ownership[new_t] = False
                 st.success(f"Added {new_t}")
                 st.rerun()
             else:
