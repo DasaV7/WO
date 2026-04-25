@@ -286,13 +286,12 @@ def safe_batch_update(tickers):
 
 # ==================== FINNHUB KEY PERSISTENCE (QUERY PARAMS) ====================
 
-# We use URL query params as a simple browser-side persistence mechanism.
+# Use URL query params as a simple browser-side persistence mechanism.
 # On first save, we store the key in the URL; on reload/redeploy, we read it back.
 
-query_params = st.experimental_get_query_params()
 if not st.session_state.finnhub_key:
-    if "fhk" in query_params and query_params["fhk"]:
-        st.session_state.finnhub_key = query_params["fhk"][0]
+    if "fhk" in st.query_params and st.query_params["fhk"]:
+        st.session_state.finnhub_key = st.query_params["fhk"]
 
 # ==================== FIRST-TIME FINNHUB SETUP ====================
 
@@ -306,7 +305,7 @@ if not st.session_state.finnhub_key:
         if key.strip():
             st.session_state.finnhub_key = key.strip()
             # Persist in URL query params so it survives refresh/redeploy
-            st.experimental_set_query_params(fhk=st.session_state.finnhub_key)
+            st.query_params["fhk"] = st.session_state.finnhub_key
             st.success("Key saved! Loading app…")
             st.rerun()
         else:
@@ -341,7 +340,7 @@ with st.sidebar:
     if st.button("Reset Finnhub Key", type="secondary"):
         st.session_state.finnhub_key = ""
         # Clear query param
-        st.experimental_set_query_params()
+        st.query_params.clear()
         st.rerun()
 
 # ==================== AUTO REFRESH (15 MIN) ====================
