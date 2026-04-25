@@ -255,7 +255,7 @@ def save_journal(entry):
     ))
 
 # ------------------------------------------------------------
-#  TRADE HISTORY (H1) — ROW-BASED, ROLLING WINDOW OF 300
+#  TRADE HISTORY — ROW-BASED, ROLLING WINDOW OF 300
 # ------------------------------------------------------------
 def save_trade_history(trade_id, timestamp, price):
     run_query("""
@@ -516,7 +516,10 @@ def safe_batch_update(tickers):
                 f"Reached safe limit ({MAX_CALLS_PER_MIN}/min). Remaining updates will run next minute."
             )
             break
+
+        # ORIGINAL — no leveraged-ticker mapping fix
         q = fetch_quote(sym)
+
         if q and q.get("c"):
             df = fetch_candles(sym)
             rv = calc_rv(df)
@@ -528,16 +531,18 @@ def safe_batch_update(tickers):
             updated += 2
             time.sleep(1.2)
 
-    # log price snapshots for open trades
+    # Log price snapshots for open trades
     now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
     for t in st.session_state.trades:
         if t.get("status") != "open":
             continue
+
         sym = t["ticker"]
         md = st.session_state.market_data.get(sym, {})
         price = md.get("price")
         if price is None:
             continue
+
         save_trade_history(t["id"], now_str, float(price))
 
     st.session_state.vix = fetch_vix()
@@ -687,7 +692,7 @@ with tab1:
             st.error("Strike and premium must be positive.")
         else:
             new_trade = {
-                "id": None,  # will be set by DB
+                "id": None,
                 "ticker": trade_ticker,
                 "type": "CSP Put" if "Put" in trade_type else "Covered Call",
                 "strike": float(strike),
@@ -701,7 +706,6 @@ with tab1:
                 "assigned": False,
             }
             save_trade(new_trade)
-            # reload trades to get ID
             load_state_from_db()
             st.success("Trade logged.")
 
@@ -746,7 +750,6 @@ with tab1:
                         key=f"close50_{t['id']}",
                         type="secondary",
                     ):
-                        # 50% of premium, scaled by contracts * 100
                         realized = t["entry_premium"] * 0.5 * t["contracts"] * 100
                         t["pnl"] = realized
                         t["status"] = "closed"
@@ -845,7 +848,6 @@ with tab1:
                     st.caption(
                         "No price history yet — run Safe Refresh to start tracking this trade."
                     )
-
 # ============================================================
 #  PART 4 — LEAPs, SUPER CHART, JOURNAL, CALENDAR, FOOTER
 # ============================================================
