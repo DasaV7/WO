@@ -2,10 +2,16 @@
 
 import time
 from datetime import datetime, timedelta
+import json
+import os
 
 import pandas as pd
 import requests
 import streamlit as st
+
+# ==================== PERSISTENCE CONFIG ====================
+
+DATA_FILE = "wheelos_state.json"
 
 # ==================== PAGE CONFIG ====================
 
@@ -130,7 +136,7 @@ MAIN_TICKER_MAP = {
     "SPY": "SPY",
 }
 
-# ==================== SESSION STATE ====================
+# ==================== SESSION STATE DEFAULTS ====================
 
 if "finnhub_key" not in st.session_state:
     st.session_state.finnhub_key = ""
@@ -168,6 +174,47 @@ if "last_refresh" not in st.session_state:
 # Ownership dictionary: ticker → True/False (B3)
 if "ownership" not in st.session_state:
     st.session_state.ownership = {}
+
+# ==================== PERSISTENCE HELPERS ====================
+
+def load_state():
+    """Load persisted state from JSON file into session_state."""
+    if not os.path.exists(DATA_FILE):
+        return
+    try:
+        with open(DATA_FILE, "r") as f:
+            data = json.load(f)
+        st.session_state.tickers = data.get("tickers", st.session_state.tickers)
+        st.session_state.trades = data.get("trades", st.session_state.trades)
+        st.session_state.ownership = data.get("ownership", st.session_state.ownership)
+        st.session_state.leaps = data.get("leaps", st.session_state.leaps)
+        st.session_state.leap_fund = data.get("leap_fund", st.session_state.leap_fund)
+        st.session_state.journal = data.get("journal", st.session_state.journal)
+    except Exception:
+        # If anything goes wrong, just keep in-memory defaults
+        pass
+
+
+def save_state():
+    """Persist key state to JSON file so trades & tickers survive reload/redeploy."""
+    data = {
+        "tickers": st.session_state.tickers,
+        "trades": st.session_state.trades,
+        "ownership": st.session_state.ownership,
+        "leaps": st.session_state.leaps,
+        "leap_fund": st.session_state.leap_fund,
+        "journal": st.session_state.journal,
+    }
+    try:
+        with open(DATA_FILE, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+    except Exception:
+        # Ignore persistence errors silently
+        pass
+
+
+# Load persisted state once at startup
+load_state()
 
 # ==================== FINNHUB HELPERS ====================
 
@@ -306,9 +353,6 @@ def safe_batch_update(tickers):
     st.session_state.econ_events = fetch_economic_calendar()
 
 # ==================== FINNHUB KEY PERSISTENCE (QUERY PARAMS) ====================
-
-# Use URL query params as a simple browser-side persistence mechanism.
-# New Streamlit API: st.query_params (no experimental_get_query_params).
 
 if not st.session_state.finnhub_key:
     qp = st.query_params
@@ -513,6 +557,7 @@ with tab2:
             value=own_default,
         )
         st.session_state.ownership[ticker] = own_checkbox  # sync to dict
+        save_state()  # ownership change persisted
 
         # Expander with details + trade logging
         with st.expander(f"{ticker} details"):
@@ -629,6 +674,7 @@ with tab2:
                                 "assigned": False,
                             }
                         )
+                        save_state()
                         st.success("CSP Put logged (red day rule enforced).")
                         st.rerun()
 
@@ -664,6 +710,7 @@ with tab2:
                             "assigned": False,
                         }
                     )
+                    save_state()
                     st.success("Covered Call logged (ownership + green day).")
                     st.rerun()
 
@@ -687,8 +734,8 @@ with tab2:
                 price = md.get("price")
                 if price is not None and price < t["strike"]:
                     t["assigned"] = True
-                    # Auto-assign ownership at ticker level
                     st.session_state.ownership[t["ticker"]] = True
+                    save_state()
 
         label = f"{t['ticker']} {t['type']} @ ${t['strike']} (exp {t['expiry']})"
         with st.expander(label):
@@ -723,7 +770,7 @@ with tab2:
                                 "note": f"Income: ${income:.2f}, Recycled to LEAP fund: ${recycled:.2f}",
                             }
                         )
-
+                        save_state()
                         st.success(
                             f"Closed at 50% profit. "
                             f"Income: ${income:.2f} • Recycled: ${recycled:.2f} → House Money"
@@ -748,6 +795,7 @@ with tab2:
                                 "note": "CSP assigned → shares owned, ready for covered calls.",
                             }
                         )
+                        save_state()
                         st.success(
                             "Position marked as assigned. Ownership updated for this ticker."
                         )
@@ -788,6 +836,7 @@ with tab2:
                                 "note": note,
                             }
                         )
+                        save_state()
                         st.success("Trade manually closed and journal updated.")
                         st.rerun()
 
@@ -841,6 +890,17 @@ with tab3:
                 }
             )
             st.session_state.leap_fund -= total_cost
+            st.session_state.journal.append(
+                {
+                    "date": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+                    "ticker": leap_ticker,
+                    "type": "LEAP",
+                    "action": "Opened",
+                    "profit": 0.0,
+                    "note": f"Opened LEAP with {contracts} contract(s) using house money.",
+                }
+            )
+            save_state()
             st.success("LEAP added using house money only.")
             st.rerun()
         else:
@@ -884,6 +944,7 @@ with tab3:
                         )
                         if confirm:
                             l["current_val"] = float(new_val)
+                            save_state()
                             st.success("LEAP value updated.")
                             st.rerun()
 
@@ -915,7 +976,7 @@ with tab3:
                                     "note": f"Sold {sell_contracts} contract(s). Recycled ${recycled:.2f} to LEAP fund.",
                                 }
                             )
-
+                            save_state()
                             st.success(
                                 f"Sold {sell_contracts} contract(s). "
                                 f"Profit: ${profit:.2f} • Recycled: ${recycled:.2f} to House Money."
@@ -1014,6 +1075,7 @@ with tab6:
         st.session_state.capital = (
             manual if manual != st.session_state.capital else selected
         )
+        save_state()
         st.success(f"Capital set to ${st.session_state.capital:,.0f}")
 
     st.markdown("---")
@@ -1048,8 +1110,8 @@ with tab6:
             if st.button("Remove", key=f"rem_{t}", type="secondary"):
                 if len(st.session_state.tickers) > 1:
                     st.session_state.tickers.remove(t)
-                    # Also clean up ownership entry
                     st.session_state.ownership.pop(t, None)
+                    save_state()
                     st.success(f"Removed {t}")
                     st.rerun()
                 else:
@@ -1064,8 +1126,8 @@ with tab6:
             q = fetch_quote(new_t)
             if q and q.get("c"):
                 st.session_state.tickers.append(new_t)
-                # Initialize ownership for new ticker
                 st.session_state.ownership[new_t] = False
+                save_state()
                 st.success(f"Added {new_t}")
                 st.rerun()
             else:
