@@ -12,10 +12,10 @@ from streamlit_lightweight_charts import renderLightweightCharts
 st.set_page_config(
     page_title="WheelOS • Options Radar",
     page_icon="◈",
-    layout="wide"
+    layout="wide",
 )
 
-# ==================== APPLE MINIMALIST THEME ====================
+# ==================== IOS / APPLE MINIMALIST THEME ====================
 
 APPLE_CSS = """
 <style>
@@ -23,13 +23,14 @@ body {
     background-color: #FAFAFA;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
 }
-section.main > div {
-    padding-top: 0.5rem;
-}
+
+/* Push content down so tabs are fully visible under Streamlit toolbar */
 .block-container {
-    padding-top: 1.5rem;
+    padding-top: 3.5rem !important;
     padding-bottom: 2rem;
 }
+
+/* General buttons */
 div.stButton > button {
     border-radius: 999px;
     border: none;
@@ -37,19 +38,34 @@ div.stButton > button {
     font-weight: 600;
     transition: all 0.15s ease-in-out;
     box-shadow: 0 8px 18px rgba(0,0,0,0.04);
+    color: #FFFFFF !important;
 }
-div.stButton > button:hover {
-    transform: translateY(-1px) scale(1.01);
-    box-shadow: 0 12px 26px rgba(0,0,0,0.08);
-}
+
+/* Primary button (systemGreen) */
 button[kind="primary"] {
-    background: linear-gradient(135deg, #4CAF50, #66BB6A);
-    color: white;
+    background: linear-gradient(135deg, #34C759, #30D158) !important;
+    color: #FFFFFF !important;
 }
+
+/* Secondary button (systemGray) */
+button[kind="secondary"] {
+    background: linear-gradient(135deg, #8E8E93, #AEAEB2) !important;
+    color: #FFFFFF !important;
+}
+
+/* Disabled buttons */
 button[disabled] {
     opacity: 0.45 !important;
     cursor: not-allowed !important;
 }
+
+/* Hover effect */
+div.stButton > button:hover {
+    transform: translateY(-1px) scale(1.01);
+    box-shadow: 0 12px 26px rgba(0,0,0,0.08);
+}
+
+/* Cards */
 .card {
     background: #FFFFFF;
     border-radius: 18px;
@@ -57,24 +73,28 @@ button[disabled] {
     box-shadow: 0 14px 30px rgba(15,23,42,0.04);
     border: 1px solid rgba(148,163,184,0.18);
 }
-.soft-red {
-    background: linear-gradient(135deg, #F97373, #FB7185);
-    color: white !important;
-}
-.soft-green {
-    background: linear-gradient(135deg, #22C55E, #4ADE80);
-    color: white !important;
-}
-.soft-gray {
-    background: linear-gradient(135deg, #CBD5F5, #E5E7EB);
-    color: #111827 !important;
-}
+
+/* Metric cards */
 .metric-card {
     background: #FFFFFF;
     border-radius: 18px;
     padding: 0.9rem 1.1rem;
     box-shadow: 0 10px 24px rgba(15,23,42,0.03);
     border: 1px solid rgba(148,163,184,0.16);
+}
+
+/* Soft red / green badges if needed */
+.soft-red {
+    background: linear-gradient(135deg, #FF3B30, #FF453A);
+    color: #FFFFFF !important;
+}
+.soft-green {
+    background: linear-gradient(135deg, #34C759, #30D158);
+    color: #FFFFFF !important;
+}
+.soft-gray {
+    background: linear-gradient(135deg, #8E8E93, #AEAEB2);
+    color: #FFFFFF !important;
 }
 </style>
 """
@@ -92,7 +112,7 @@ MAIN_TICKER_MAP = {
     "TSLL": "TSLA",
     "NVDL": "NVDA",
     "QQQ": "QQQ",
-    "SPY": "SPY"
+    "SPY": "SPY",
 }
 
 CORE_LEVERAGED = ["TSLL", "SOXL", "TQQQ", "NVDL"]
@@ -100,11 +120,10 @@ CORE_LEVERAGED = ["TSLL", "SOXL", "TQQQ", "NVDL"]
 # ==================== SESSION STATE ====================
 
 if "finnhub_key" not in st.session_state:
-    st.session_state.finnhub_key = st.secrets.get("finnhub", {}).get("key", "")
+    st.session_state.finnhub_key = ""
 
 if "trades" not in st.session_state:
-    # CSP + Covered Calls
-    st.session_state.trades = []
+    st.session_state.trades = []  # CSP + Covered Calls
 
 if "leaps" not in st.session_state:
     st.session_state.leaps = []
@@ -188,7 +207,6 @@ def calc_rv(df: pd.DataFrame | None):
 
 
 def fetch_vix():
-    # Finnhub uses ^VIX for CBOE Volatility Index
     q = fetch_quote("^VIX")
     if q and q.get("c"):
         return round(q["c"], 2)
@@ -205,7 +223,6 @@ def fetch_economic_calendar(days_ahead: int = 7):
     if not data or "economicCalendar" not in data:
         return []
     events = data["economicCalendar"]
-    # Keep only higher impact events if available
     df = pd.DataFrame(events)
     if "impact" in df.columns:
         df = df[df["impact"].isin(["high", "medium"])].copy()
@@ -213,7 +230,6 @@ def fetch_economic_calendar(days_ahead: int = 7):
 
 
 def fetch_options_chain(symbol: str):
-    # Finnhub options chain endpoint
     data = _finnhub_get("/stock/option-chain", {"symbol": symbol})
     if not data:
         return None
@@ -221,7 +237,6 @@ def fetch_options_chain(symbol: str):
 
 
 def nearest_30d_expiry_from_chain(chain: dict):
-    """Find expiry closest to 30 DTE from Finnhub chain."""
     if not chain or "data" not in chain:
         return None
     expiries = set()
@@ -266,9 +281,18 @@ def safe_batch_update(tickers):
             updated += 2
             time.sleep(1.2)
 
-    # VIX + econ events on refresh
     st.session_state.vix = fetch_vix()
     st.session_state.econ_events = fetch_economic_calendar()
+
+# ==================== FINNHUB KEY PERSISTENCE (QUERY PARAMS) ====================
+
+# We use URL query params as a simple browser-side persistence mechanism.
+# On first save, we store the key in the URL; on reload/redeploy, we read it back.
+
+query_params = st.experimental_get_query_params()
+if not st.session_state.finnhub_key:
+    if "fhk" in query_params and query_params["fhk"]:
+        st.session_state.finnhub_key = query_params["fhk"][0]
 
 # ==================== FIRST-TIME FINNHUB SETUP ====================
 
@@ -281,6 +305,8 @@ if not st.session_state.finnhub_key:
     if st.button("Save & Launch App", type="primary"):
         if key.strip():
             st.session_state.finnhub_key = key.strip()
+            # Persist in URL query params so it survives refresh/redeploy
+            st.experimental_set_query_params(fhk=st.session_state.finnhub_key)
             st.success("Key saved! Loading app…")
             st.rerun()
         else:
@@ -303,15 +329,19 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**Discipline Guardrails**")
-    st.caption("• Only CSP on red days (≤ -5%)\n"
-               "• Close at 50% profit\n"
-               "• 50% income / 50% LEAP fund\n"
-               "• LEAPs = house money only\n"
-               "• Max 5 open positions\n"
-               "• Keep 30%+ cash")
+    st.caption(
+        "• Only CSP on red days (≤ -5%)\n"
+        "• Close at 50% profit\n"
+        "• 50% income / 50% LEAP fund\n"
+        "• LEAPs = house money only\n"
+        "• Max 5 open positions\n"
+        "• Keep 30%+ cash"
+    )
 
-    if st.button("Reset Finnhub Key"):
+    if st.button("Reset Finnhub Key", type="secondary"):
         st.session_state.finnhub_key = ""
+        # Clear query param
+        st.experimental_set_query_params()
         st.rerun()
 
 # ==================== AUTO REFRESH (15 MIN) ====================
@@ -367,7 +397,7 @@ with tab1:
 
     st.markdown("---")
 
-    if st.button("🔄 Safe Refresh (≤50 calls/min)"):
+    if st.button("🔄 Safe Refresh (≤50 calls/min)", type="primary"):
         safe_batch_update(st.session_state.tickers)
         st.success("Batch update completed safely")
         st.rerun()
@@ -383,7 +413,7 @@ with tab1:
 
     st.markdown("---")
     st.markdown("#### Graduation Progress")
-    # Simple heuristic: based on number of closed CSPs and LEAPs
+
     num_csp_closed = len([t for t in closed if "CSP" in t.get("type", "")])
     num_leaps = len(st.session_state.leaps)
 
@@ -423,14 +453,15 @@ with tab1:
 with tab2:
     st.subheader("CSP Trades • Red Day Sell Put / Assignment → Covered Calls")
 
-    # Guardrails
     open_positions = [t for t in st.session_state.trades if t.get("status") == "open"]
     num_open = len(open_positions)
     cash_required = sum(
         t.get("strike", 0) * 100 for t in open_positions if "Put" in t.get("type", "")
     )
     cash_available = st.session_state.capital - cash_required
-    cash_ratio = cash_available / st.session_state.capital if st.session_state.capital else 1
+    cash_ratio = (
+        cash_available / st.session_state.capital if st.session_state.capital else 1
+    )
 
     if num_open >= 5:
         st.error("Max 5 open positions reached — new CSPs are disabled.")
@@ -449,7 +480,6 @@ with tab2:
     if st.session_state.vix is not None and st.session_state.vix >= VIX_LIMIT:
         st.error("VIX is elevated — new CSP/CC trades are paused per rules.")
 
-    # Per-ticker CSP / CC logging
     for ticker in st.session_state.tickers:
         d = st.session_state.market_data.get(ticker, {})
         price = d.get("price")
@@ -484,21 +514,27 @@ with tab2:
             elif rv is None:
                 st.warning("RV data not loaded yet – trading based on price action only.")
 
-            # Options chain preview (nearest ~30D expiry)
             main_ticker = MAIN_TICKER_MAP.get(ticker, ticker)
             chain = fetch_options_chain(main_ticker)
             expiry_30 = nearest_30d_expiry_from_chain(chain)
             if chain and expiry_30:
-                st.markdown(f"**Nearest ~30D Expiry:** `{expiry_30}` (underlying: {main_ticker})")
+                st.markdown(
+                    f"**Nearest ~30D Expiry:** `{expiry_30}` (underlying: {main_ticker})"
+                )
                 rows = [
                     r for r in chain["data"]
                     if r.get("expirationDate") == expiry_30
                 ]
                 if rows:
                     df_chain = pd.DataFrame(rows)
-                    # Show a compact view
                     cols_to_show = [
-                        "type", "strike", "lastPrice", "bid", "ask", "impliedVolatility", "openInterest"
+                        "type",
+                        "strike",
+                        "lastPrice",
+                        "bid",
+                        "ask",
+                        "impliedVolatility",
+                        "openInterest",
                     ]
                     df_chain = df_chain[cols_to_show].rename(
                         columns={
@@ -511,7 +547,11 @@ with tab2:
                             "openInterest": "OI",
                         }
                     )
-                    st.dataframe(df_chain.sort_values(["Type", "Strike"]), use_container_width=True, height=260)
+                    st.dataframe(
+                        df_chain.sort_values(["Type", "Strike"]),
+                        use_container_width=True,
+                        height=260,
+                    )
                 else:
                     st.info("No options rows found for nearest 30D expiry.")
             else:
@@ -543,10 +583,14 @@ with tab2:
 
             col_btn1, col_btn2 = st.columns(2)
 
-            # CSP PUT
             with col_btn1:
-                disabled_put = not put_enabled or num_open >= 5 or (
-                    st.session_state.vix is not None and st.session_state.vix >= VIX_LIMIT
+                disabled_put = (
+                    not put_enabled
+                    or num_open >= 5
+                    or (
+                        st.session_state.vix is not None
+                        and st.session_state.vix >= VIX_LIMIT
+                    )
                 )
                 if st.button(
                     f"Log Sell CSP Put on {ticker}",
@@ -554,7 +598,6 @@ with tab2:
                     disabled=disabled_put,
                     type="primary",
                 ):
-                    # Capital check
                     required = strike_input * 100
                     if cash_available - required < st.session_state.capital * 0.3:
                         st.error("This CSP would push cash below 30% — blocked by rules.")
@@ -576,9 +619,7 @@ with tab2:
                         st.success("CSP Put logged (red day rule enforced).")
                         st.rerun()
 
-            # COVERED CALL (for assigned shares)
             with col_btn2:
-                # Only allow CC if user has an assigned CSP on this ticker
                 assigned_positions = [
                     t for t in st.session_state.trades
                     if t.get("ticker") == ticker and t.get("assigned") is True
@@ -587,7 +628,10 @@ with tab2:
                     not call_enabled
                     or len(assigned_positions) == 0
                     or num_open >= 5
-                    or (st.session_state.vix is not None and st.session_state.vix >= VIX_LIMIT)
+                    or (
+                        st.session_state.vix is not None
+                        and st.session_state.vix >= VIX_LIMIT
+                    )
                 )
                 if st.button(
                     f"Log Covered Call on {ticker}",
@@ -624,7 +668,6 @@ with tab2:
             st.write(f"Entry Premium: **${t.get('entry_premium', '—')}**")
             st.write(f"Opened: {t.get('opened', '—')}")
 
-            # Close at 50% profit (CSP & CC)
             col1, col2, col3 = st.columns(3)
             with col1:
                 if "CSP" in t["type"] or "Covered Call" in t["type"]:
@@ -633,7 +676,6 @@ with tab2:
                         t["pnl"] = profit
                         t["status"] = "closed"
                         t["closed_date"] = datetime.utcnow().strftime("%Y-%m-%d")
-                        # 50% income, 50% to LEAP fund
                         income = profit * 0.5
                         recycled = profit * 0.5
                         st.session_state.leap_fund += recycled
@@ -655,10 +697,11 @@ with tab2:
                         )
                         st.rerun()
 
-            # Mark as assigned (for CSP → CC)
             with col2:
                 if "CSP" in t["type"] and not t.get("assigned", False):
-                    if st.button("Mark as Assigned (Shares Received)", key=f"assign_{t['id']}"):
+                    if st.button(
+                        "Mark as Assigned (Shares Received)", key=f"assign_{t['id']}"
+                    ):
                         t["assigned"] = True
                         st.session_state.journal.append(
                             {
@@ -670,10 +713,11 @@ with tab2:
                                 "note": "CSP assigned → shares owned, ready for covered calls.",
                             }
                         )
-                        st.success("Position marked as assigned. Look for green days to sell covered calls.")
+                        st.success(
+                            "Position marked as assigned. Look for green days to sell covered calls."
+                        )
                         st.rerun()
 
-            # Manual close (no 50% rule)
             with col3:
                 if st.button("Manual Close (Custom P&L)", key=f"manual_{t['id']}"):
                     pnl = st.number_input(
@@ -681,17 +725,21 @@ with tab2:
                         key=f"pnl_input_{t['id']}",
                         value=0.0,
                     )
-                    confirm = st.button("Confirm Manual Close", key=f"confirm_manual_{t['id']}")
+                    confirm = st.button(
+                        "Confirm Manual Close", key=f"confirm_manual_{t['id']}"
+                    )
                     if confirm:
                         t["pnl"] = float(pnl)
                         t["status"] = "closed"
                         t["closed_date"] = datetime.utcnow().strftime("%Y-%m-%d")
-                        # Still follow 50/50 split on profit if positive
                         if pnl > 0:
                             income = pnl * 0.5
                             recycled = pnl * 0.5
                             st.session_state.leap_fund += recycled
-                            note = f"Manual close. Income: ${income:.2f}, Recycled: ${recycled:.2f}"
+                            note = (
+                                f"Manual close. Income: ${income:.2f}, "
+                                f"Recycled: ${recycled:.2f}"
+                            )
                         else:
                             note = "Manual close. Loss or zero P&L."
                         st.session_state.journal.append(
@@ -719,7 +767,9 @@ with tab3:
         "(QQQ, SOXX, TSLA, NVDA, etc.). Only buy with **house money** from CSP profits."
     )
 
-    leap_ticker = st.selectbox("LEAP Ticker", options=list(MAIN_TICKER_MAP.values()), key="leap_sel")
+    leap_ticker = st.selectbox(
+        "LEAP Ticker", options=list(MAIN_TICKER_MAP.values()), key="leap_sel"
+    )
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -764,10 +814,14 @@ with tab3:
     st.subheader("Your LEAP Positions")
 
     if not st.session_state.leaps:
-        st.info("No LEAP positions yet. Build CSP profits first, then deploy house money into LEAPs.")
+        st.info(
+            "No LEAP positions yet. Build CSP profits first, then deploy house money into LEAPs."
+        )
     else:
         for l in st.session_state.leaps:
-            with st.expander(f"{l['ticker']} LEAP — {l['contracts']} contract(s) exp {l['expiry']}"):
+            with st.expander(
+                f"{l['ticker']} LEAP — {l['contracts']} contract(s) exp {l['expiry']}"
+            ):
                 st.write(
                     f"Cost: **${l['cost']}** | Current: **${l['current_val']}** | "
                     f"Opened: {l.get('opened', '—')}"
@@ -799,16 +853,17 @@ with tab3:
                         if l["contracts"] <= 0:
                             st.warning("No contracts left to sell.")
                         else:
-                            # Sell half of the position (rounded down)
                             sell_contracts = max(1, l["contracts"] // 2)
                             avg_price = l["current_val"] / max(l["contracts"], 1)
                             proceeds = avg_price * sell_contracts
-                            profit = proceeds - (l["cost"] * (sell_contracts / max(l["contracts"], 1)))
-                            # 50% of profit recycled back into LEAP fund
+                            cost_fraction = l["cost"] * (
+                                sell_contracts / max(l["contracts"], 1)
+                            )
+                            profit = proceeds - cost_fraction
                             recycled = max(profit, 0) * 0.5
                             st.session_state.leap_fund += recycled
                             l["contracts"] -= sell_contracts
-                            l["cost"] -= l["cost"] * (sell_contracts / max(l["contracts"] + sell_contracts, 1))
+                            l["cost"] -= cost_fraction
                             l["current_val"] -= avg_price * sell_contracts
 
                             st.session_state.journal.append(
@@ -833,7 +888,9 @@ with tab3:
 with tab4:
     st.subheader("TradingView Super Chart + RSI")
 
-    ticker = st.selectbox("Select Leveraged Ticker", st.session_state.tickers, key="superchart_ticker")
+    ticker = st.selectbox(
+        "Select Leveraged Ticker", st.session_state.tickers, key="superchart_ticker"
+    )
     main_ticker = MAIN_TICKER_MAP.get(ticker, ticker)
     st.write(f"Showing: **{ticker}** (Volume + RSI) + **{main_ticker}** (overlay)")
 
@@ -880,7 +937,6 @@ with tab5:
         st.caption("No events loaded yet. Use Safe Refresh on Dashboard to pull calendar.")
     else:
         df_events = pd.DataFrame(st.session_state.econ_events)
-        # Clean up columns if present
         rename_map = {
             "time": "Time",
             "country": "Country",
@@ -900,12 +956,15 @@ with tab6:
 
     st.markdown("### Investment Capital")
     capital_options = [10000, 20000, 30000, 50000, 100000]
+    selected_index = (
+        capital_options.index(st.session_state.capital)
+        if st.session_state.capital in capital_options
+        else 1
+    )
     selected = st.selectbox(
         "Select starting capital",
         capital_options,
-        index=capital_options.index(st.session_state.capital)
-        if st.session_state.capital in capital_options
-        else 1,
+        index=selected_index,
     )
     manual = st.number_input(
         "Or enter custom amount",
@@ -913,8 +972,10 @@ with tab6:
         value=int(st.session_state.capital),
         step=1000,
     )
-    if st.button("Save Capital"):
-        st.session_state.capital = manual if manual != st.session_state.capital else selected
+    if st.button("Save Capital", type="primary"):
+        st.session_state.capital = (
+            manual if manual != st.session_state.capital else selected
+        )
         st.success(f"Capital set to ${st.session_state.capital:,.0f}")
 
     st.markdown("---")
@@ -946,7 +1007,7 @@ with tab6:
         with col1:
             st.write(f"• {t}")
         with col2:
-            if st.button("Remove", key=f"rem_{t}"):
+            if st.button("Remove", key=f"rem_{t}", type="secondary"):
                 if len(st.session_state.tickers) > 1:
                     st.session_state.tickers.remove(t)
                     st.success(f"Removed {t}")
@@ -958,7 +1019,7 @@ with tab6:
     st.markdown("### Add New Ticker")
 
     new_t = st.text_input("Ticker Symbol").upper().strip()
-    if st.button("Add Ticker"):
+    if st.button("Add Ticker", type="primary"):
         if new_t and new_t not in st.session_state.tickers:
             q = fetch_quote(new_t)
             if q and q.get("c"):
@@ -972,9 +1033,11 @@ with tab6:
 
     st.markdown("---")
     st.markdown("### Safe Full Refresh")
-    if st.button("🔄 Safe Full Refresh (≤50 calls/min)"):
+    if st.button("🔄 Safe Full Refresh (≤50 calls/min)", type="primary"):
         safe_batch_update(st.session_state.tickers)
         st.success("Safe batch update completed.")
         st.rerun()
 
-st.caption("WheelOS • Matt @MarketMovesMatt Strategy • CSP Income + LEAP Growth • House Money Only for LEAPs")
+st.caption(
+    "WheelOS • Matt @MarketMovesMatt Strategy • CSP Income + LEAP Growth • House Money Only for LEAPs"
+)
