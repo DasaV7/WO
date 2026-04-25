@@ -485,8 +485,8 @@ def load_version_info():
     notes_json = get_setting("version_notes", None)
 
     if ver is None:
-        ver = "A.02"
-        notes = {"A.02": "Baseline A.02 with reverted layout and live status tracking."}
+        ver = "A.03"
+        notes = {"A.03": "Baseline A.03 with full-page CSP tab and Super Chart fixes."}
         set_setting("app_version", ver)
         set_setting("version_notes", json.dumps(notes))
         return ver, notes
@@ -735,7 +735,6 @@ def safe_batch_update(tickers):
 
     st.session_state.market_data = market_data
 
-    # Update trade history for open trades
     for t in st.session_state.trades:
         if t["status"] != "open":
             continue
@@ -766,11 +765,11 @@ init_db()
 load_state_from_db()
 app_version, version_notes = load_version_info()
 
-# Force baseline to A.02 if older
-if app_version != "A.02":
-    app_version = "A.02"
-    if "A.02" not in version_notes:
-        version_notes["A.02"] = "Baseline A.02 with reverted layout and live status tracking."
+# Force baseline to A.03
+if app_version != "A.03":
+    app_version = "A.03"
+    if "A.03" not in version_notes:
+        version_notes["A.03"] = "Baseline A.03 with full-page CSP tab and Super Chart fixes."
     save_version_info(app_version, version_notes)
 
 st.markdown(
@@ -848,7 +847,7 @@ with st.sidebar:
     st.caption(f"Current Version: **{app_version}**")
 
     with st.form("version_increment_form", clear_on_submit=True):
-        st.write("Increment Version (A.02 → A.03, etc.)")
+        st.write("Increment Version")
         inc_note = st.text_input(
             "One-line summary for new version",
             placeholder="Describe what changed in this version...",
@@ -865,7 +864,7 @@ with st.sidebar:
                 st.success(f"Version incremented to {app_version}")
 
     with st.form("version_baseline_form", clear_on_submit=True):
-        st.write("New Baseline Version (A.02 → B.01, etc.)")
+        st.write("New Baseline Version")
         base_note = st.text_input(
             "One-line summary for new baseline version",
             placeholder="Describe what changed in this baseline...",
@@ -922,7 +921,7 @@ with col_d:
         st.metric("VIX", "—")
 
 # ============================================================
-#  TABS (FULL-PAGE STYLE)
+#  TABS (FULL-PAGE FEEL)
 # ============================================================
 
 tab1, tab2, tab3, tab4 = st.tabs(
@@ -936,7 +935,7 @@ tab1, tab2, tab3, tab4 = st.tabs(
 with tab1:
     st.subheader("Wheel / CSP Tracker")
 
-    st.markdown("#### Tracked Tickers")
+    st.markdown("### Tracked Tickers")
     c1, c2 = st.columns([3, 1])
     with c1:
         new_sym = st.text_input("Add Ticker", placeholder="e.g. TSLL")
@@ -954,7 +953,7 @@ with tab1:
 
     st.markdown("---")
 
-    st.markdown("#### Ownership (for Covered Calls)")
+    st.markdown("### Ownership (for Covered Calls)")
     for sym in st.session_state.tickers:
         owns = st.checkbox(
             f"Own shares of {sym}",
@@ -966,7 +965,7 @@ with tab1:
 
     st.markdown("---")
 
-    st.markdown("#### Market Snapshot (after Safe Refresh)")
+    st.markdown("### Market Snapshot (after Safe Refresh)")
     if st.session_state.market_data:
         rows = []
         for sym in st.session_state.tickers:
@@ -989,7 +988,7 @@ with tab1:
 
     st.markdown("---")
 
-    st.markdown("#### Log New Trade")
+    st.markdown("### Log New Trade")
 
     col_t1, col_t2, col_t3 = st.columns(3)
     with col_t1:
@@ -1025,7 +1024,6 @@ with tab1:
     with col_t6:
         expiry = st.date_input("Expiry")
 
-    # Warning if CC without ownership
     if "Covered Call" in trade_type and not st.session_state.ownership.get(trade_ticker, False):
         st.warning(
             f"You selected a Covered Call on {trade_ticker} but ownership is not checked. "
@@ -1219,7 +1217,7 @@ with tab1:
 with tab2:
     st.subheader("LEAPs Tracker")
 
-    st.markdown("#### Add LEAP Position")
+    st.markdown("### Add LEAP Position")
     l1, l2, l3 = st.columns(3)
     with l1:
         leap_ticker = st.selectbox(
@@ -1319,7 +1317,9 @@ with tab2:
 with tab3:
     st.subheader("Super Chart")
 
-    if not st.session_state.tickers:
+    if not st.session_state.finnhub_key:
+        st.warning("Enter your Finnhub API key in the sidebar to load Super Chart data.")
+    elif not st.session_state.tickers:
         st.info("Add at least one ticker to view charts.")
     else:
         sc1, sc2 = st.columns([2, 1])
@@ -1335,7 +1335,7 @@ with tab3:
 
         df = fetch_candles(main_sym)
         if df is None or df.empty:
-            st.warning("No candle data available for this symbol.")
+            st.warning("No candle data available for this symbol or API call failed.")
         else:
             st.line_chart(
                 df.set_index("time")["close"],
