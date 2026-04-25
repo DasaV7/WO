@@ -619,13 +619,14 @@ with tab2:
                         st.rerun()
 
             with col_btn2:
-                assigned_positions = [
-                    t for t in st.session_state.trades
-                    if t.get("ticker") == ticker and t.get("assigned") is True
-                ]
+                # Determine if user owns shares for this ticker (manual or auto)
+                owns_shares = any(
+                    t.get("ticker") == ticker and t.get("assigned") is True
+                    for t in st.session_state.trades
+                )
                 disabled_call = (
                     not call_enabled
-                    or len(assigned_positions) == 0
+                    or not owns_shares
                     or num_open >= 5
                     or (
                         st.session_state.vix is not None
@@ -658,14 +659,38 @@ with tab2:
     st.markdown("---")
     st.subheader("Open Wheel Positions")
 
+    today = datetime.utcnow().date()
+
     for t in st.session_state.trades:
         if t.get("status") != "open":
             continue
+
+        # ---------- AUTO-DETECT ASSIGNMENT FOR CSP ----------
+        try:
+            expiry_date = datetime.strptime(t["expiry"], "%Y-%m-%d").date()
+        except Exception:
+            expiry_date = today
+
+        if "CSP" in t["type"]:
+            # Near or past expiry
+            if today >= expiry_date or (expiry_date - today).days <= 1:
+                md = st.session_state.market_data.get(t["ticker"], {})
+                price = md.get("price")
+                if price is not None and price < t["strike"]:
+                    t["assigned"] = True
 
         label = f"{t['ticker']} {t['type']} @ ${t['strike']} (exp {t['expiry']})"
         with st.expander(label):
             st.write(f"Entry Premium: **${t.get('entry_premium', '—')}**")
             st.write(f"Opened: {t.get('opened', '—')}")
+            st.write(f"Assigned / Own Shares: **{t.get('assigned', False)}**")
+
+            # Manual ownership toggle
+            own_key = f"own_{t['id']}"
+            manual_own = st.checkbox("I own shares for this ticker", key=own_key, value=t.get("assigned", False))
+            if manual_own and not t.get("assigned", False):
+                t["assigned"] = True
+                st.info("Marked as owning shares for this ticker (manual override).")
 
             col1, col2, col3 = st.columns(3)
             with col1:
