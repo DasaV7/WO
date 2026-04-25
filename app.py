@@ -1,257 +1,554 @@
 # app.py
 
-import time
-from datetime import datetime, timedelta
-import json
-import os
-
-import pandas as pd
-import requests
 import streamlit as st
+import sqlite3
+import requests
+import pandas as pd
+import time
+import json
+from datetime import datetime, date, timedelta
+from math import sqrt
 
-# ==================== PERSISTENCE CONFIG ====================
+# ============================================================
+#  CONFIG & CONSTANTS
+# ============================================================
 
-DATA_FILE = "wheelos_state.json"
+DB_PATH = "wheelos.db"
+SAFE_REFRESH_MIN_INTERVAL = 60  # seconds
+MAX_HISTORY_ROWS_PER_TRADE = 300
 
-# ==================== PAGE CONFIG ====================
+DEFAULT_TICKERS = ["TSLL", "SOXL", "TQQQ"]
+DEFAULT_CAPITAL = 20000
+DEFAULT_LEAP_FUND = 0
 
-st.set_page_config(
-    page_title="WheelOS • Options Radar",
-    page_icon="◈",
-    layout="wide",
-)
-
-# ==================== IOS / APPLE MINIMALIST THEME + BANNERS ====================
-
-APPLE_CSS = """
-<style>
-body {
-    background-color: #FAFAFA;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-}
-
-/* Main container padding */
-.block-container {
-    padding-top: 3.5rem !important;
-    padding-bottom: 2rem;
-}
-
-/* Buttons */
-div.stButton > button {
-    border-radius: 999px;
-    border: none;
-    padding: 0.5rem 1.4rem;
-    font-weight: 600;
-    transition: all 0.15s ease-in-out;
-    box-shadow: 0 8px 18px rgba(0,0,0,0.04);
-    color: #FFFFFF !important;
-}
-
-button[kind="primary"] {
-    background: linear-gradient(135deg, #34C759, #30D158) !important;
-    color: #FFFFFF !important;
-}
-
-button[kind="secondary"] {
-    background: linear-gradient(135deg, #8E8E93, #AEAEB2) !important;
-    color: #FFFFFF !important;
-}
-
-button[disabled] {
-    opacity: 0.45 !important;
-    cursor: not-allowed !important;
-}
-
-div.stButton > button:hover {
-    transform: translateY(-1px) scale(1.01);
-    box-shadow: 0 12px 26px rgba(0,0,0,0.08);
-}
-
-/* Cards */
-.card {
-    background: #FFFFFF;
-    border-radius: 18px;
-    padding: 1.1rem 1.2rem;
-    box-shadow: 0 14px 30px rgba(15,23,42,0.04);
-    border: 1px solid rgba(148,163,184,0.18);
-}
-
-.metric-card {
-    background: #FFFFFF;
-    border-radius: 18px;
-    padding: 0.9rem 1.1rem;
-    box-shadow: 0 10px 24px rgba(15,23,42,0.03);
-    border: 1px solid rgba(148,163,184,0.16);
-}
-
-/* Ticker banners (C1 + R1 + S1) */
-.ticker-banner {
-    width: 100%;
-    padding: 0.65rem 1.0rem;
-    border-radius: 14px;
-    color: #FFFFFF;
-    font-weight: 600;
-    margin-bottom: 0.35rem;
-    box-shadow: 0 6px 18px rgba(0,0,0,0.12);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    box-sizing: border-box;
-    font-size: 0.95rem;
-}
-
-.ticker-banner-red {
-    background: #FF3B30;
-}
-
-.ticker-banner-green {
-    background: #34C759;
-}
-
-.ticker-banner-gray {
-    background: #8E8E93;
-}
-
-/* Small right-side label in banner */
-.ticker-banner-label {
-    font-size: 0.8rem;
-    opacity: 0.9;
-}
-</style>
-"""
-st.markdown(APPLE_CSS, unsafe_allow_html=True)
-
-# ==================== CONSTANTS ====================
-
-VIX_LIMIT = 25
-MOVE_PCT = 5
-MAX_CALLS_PER_MIN = 50
-
+# Mapping leveraged tickers to underlyings for charts
 MAIN_TICKER_MAP = {
+    "TSLL": "TSLA",
     "TQQQ": "QQQ",
     "SOXL": "SOXX",
-    "TSLL": "TSLA",
     "NVDL": "NVDA",
-    "QQQ": "QQQ",
-    "SPY": "SPY",
 }
 
-# ==================== SESSION STATE DEFAULTS ====================
+# ============================================================
+#  DB HELPERS
+# ============================================================
 
-if "finnhub_key" not in st.session_state:
-    st.session_state.finnhub_key = ""
+def get_conn():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-if "trades" not in st.session_state:
-    st.session_state.trades = []  # CSP + Covered Calls
 
-if "leaps" not in st.session_state:
-    st.session_state.leaps = []
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
 
-if "leap_fund" not in st.session_state:
-    st.session_state.leap_fund = 0.0
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tickers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT UNIQUE
+        )
+        """
+    )
 
-if "market_data" not in st.session_state:
-    st.session_state.market_data = {}
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ownership (
+            ticker TEXT PRIMARY KEY,
+            owns_shares INTEGER
+        )
+        """
+    )
 
-if "tickers" not in st.session_state:
-    st.session_state.tickers = ["TSLL", "SOXL", "TQQQ"]
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT,
+            type TEXT,
+            strike REAL,
+            expiry TEXT,
+            entry_premium REAL,
+            contracts INTEGER,
+            status TEXT,
+            pnl REAL,
+            opened TEXT,
+            closed_date TEXT,
+            assigned INTEGER
+        )
+        """
+    )
 
-if "capital" not in st.session_state:
-    st.session_state.capital = 20000
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS leaps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT,
+            cost REAL,
+            current_val REAL,
+            contracts INTEGER,
+            expiry TEXT,
+            opened TEXT
+        )
+        """
+    )
 
-if "journal" not in st.session_state:
-    st.session_state.journal = []
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT,
+            ticker TEXT,
+            type TEXT,
+            action TEXT,
+            profit REAL,
+            note TEXT
+        )
+        """
+    )
 
-if "vix" not in st.session_state:
-    st.session_state.vix = None
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id INTEGER,
+            timestamp TEXT,
+            price REAL
+        )
+        """
+    )
 
-if "econ_events" not in st.session_state:
-    st.session_state.econ_events = []
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """
+    )
 
-if "last_refresh" not in st.session_state:
-    st.session_state.last_refresh = time.time()
+    conn.commit()
+    conn.close()
 
-# Ownership dictionary: ticker → True/False (B3)
-if "ownership" not in st.session_state:
-    st.session_state.ownership = {}
 
-# ==================== PERSISTENCE HELPERS ====================
+def get_setting(key, default=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = cur.fetchone()
+    conn.close()
+    if row is None:
+        return default
+    return row[0]
 
-def load_state():
-    """Load persisted state from JSON file into session_state."""
-    if not os.path.exists(DATA_FILE):
-        return
+
+def set_setting(key, value):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO settings(key, value)
+        VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_tickers():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT symbol FROM tickers ORDER BY symbol")
+    rows = cur.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def save_ticker(symbol):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR IGNORE INTO tickers(symbol) VALUES(?)",
+        (symbol,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_ownership():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT ticker, owns_shares FROM ownership")
+    rows = cur.fetchall()
+    conn.close()
+    return {r[0]: bool(r[1]) for r in rows}
+
+
+def save_ownership(ticker, owns):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO ownership(ticker, owns_shares)
+        VALUES(?, ?)
+        ON CONFLICT(ticker) DO UPDATE SET owns_shares = excluded.owns_shares
+        """,
+        (ticker, int(owns)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_trades():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, ticker, type, strike, expiry, entry_premium,
+               contracts, status, pnl, opened, closed_date, assigned
+        FROM trades
+        ORDER BY opened DESC, id DESC
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    trades = []
+    for r in rows:
+        trades.append(
+            {
+                "id": r[0],
+                "ticker": r[1],
+                "type": r[2],
+                "strike": r[3],
+                "expiry": r[4],
+                "entry_premium": r[5],
+                "contracts": r[6],
+                "status": r[7],
+                "pnl": r[8],
+                "opened": r[9],
+                "closed_date": r[10],
+                "assigned": bool(r[11]),
+            }
+        )
+    return trades
+
+
+def save_trade(trade):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO trades(
+            ticker, type, strike, expiry, entry_premium,
+            contracts, status, pnl, opened, closed_date, assigned
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            trade["ticker"],
+            trade["type"],
+            trade["strike"],
+            trade["expiry"],
+            trade["entry_premium"],
+            trade["contracts"],
+            trade["status"],
+            trade["pnl"],
+            trade["opened"],
+            trade["closed_date"],
+            int(trade["assigned"]),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_trade(trade):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE trades
+        SET ticker = ?, type = ?, strike = ?, expiry = ?,
+            entry_premium = ?, contracts = ?, status = ?,
+            pnl = ?, opened = ?, closed_date = ?, assigned = ?
+        WHERE id = ?
+        """,
+        (
+            trade["ticker"],
+            trade["type"],
+            trade["strike"],
+            trade["expiry"],
+            trade["entry_premium"],
+            trade["contracts"],
+            trade["status"],
+            trade["pnl"],
+            trade["opened"],
+            trade["closed_date"],
+            int(trade["assigned"]),
+            trade["id"],
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_leaps():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, ticker, cost, current_val, contracts, expiry, opened
+        FROM leaps
+        ORDER BY opened DESC, id DESC
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    leaps = []
+    for r in rows:
+        leaps.append(
+            {
+                "id": r[0],
+                "ticker": r[1],
+                "cost": r[2],
+                "current_val": r[3],
+                "contracts": r[4],
+                "expiry": r[5],
+                "opened": r[6],
+            }
+        )
+    return leaps
+
+
+def save_leap(leap):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO leaps(
+            ticker, cost, current_val, contracts, expiry, opened
+        )
+        VALUES(?,?,?,?,?,?)
+        """,
+        (
+            leap["ticker"],
+            leap["cost"],
+            leap["current_val"],
+            leap["contracts"],
+            leap["expiry"],
+            leap["opened"],
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_journal():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, date, ticker, type, action, profit, note
+        FROM journal
+        ORDER BY date DESC, id DESC
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    journal = []
+    for r in rows:
+        journal.append(
+            {
+                "id": r[0],
+                "date": r[1],
+                "ticker": r[2],
+                "type": r[3],
+                "action": r[4],
+                "profit": r[5],
+                "note": r[6],
+            }
+        )
+    return journal
+
+
+def save_journal(entry):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO journal(date, ticker, type, action, profit, note)
+        VALUES(?,?,?,?,?,?)
+        """,
+        (
+            entry["date"],
+            entry["ticker"],
+            entry["type"],
+            entry["action"],
+            entry["profit"],
+            entry.get("note", ""),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def insert_trade_history(trade_id, price, ts=None):
+    if ts is None:
+        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO trade_history(trade_id, timestamp, price)
+        VALUES(?,?,?)
+        """,
+        (trade_id, ts, price),
+    )
+    conn.commit()
+    conn.close()
+
+
+def trim_trade_history(trade_id, max_rows=MAX_HISTORY_ROWS_PER_TRADE):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id FROM trade_history
+        WHERE trade_id = ?
+        ORDER BY timestamp DESC, id DESC
+        LIMIT -1 OFFSET ?
+        """,
+        (trade_id, max_rows),
+    )
+    rows = cur.fetchall()
+    if rows:
+        ids_to_delete = [r[0] for r in rows]
+        cur.execute(
+            f"DELETE FROM trade_history WHERE id IN ({','.join('?'*len(ids_to_delete))})",
+            ids_to_delete,
+        )
+    conn.commit()
+    conn.close()
+
+
+def load_trade_history(trade_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT timestamp, price
+        FROM trade_history
+        WHERE trade_id = ?
+        ORDER BY timestamp ASC, id ASC
+        """,
+        (trade_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    history = []
+    for r in rows:
+        history.append({"timestamp": r[0], "price": r[1]})
+    return history
+
+
+# ============================================================
+#  VERSIONING HELPERS
+# ============================================================
+
+def parse_version(ver_str):
+    # "A.05" -> ("A", 5)
     try:
-        with open(DATA_FILE, "r") as f:
-            data = json.load(f)
-        st.session_state.tickers = data.get("tickers", st.session_state.tickers)
-        st.session_state.trades = data.get("trades", st.session_state.trades)
-        st.session_state.ownership = data.get("ownership", st.session_state.ownership)
-        st.session_state.leaps = data.get("leaps", st.session_state.leaps)
-        st.session_state.leap_fund = data.get("leap_fund", st.session_state.leap_fund)
-        st.session_state.journal = data.get("journal", st.session_state.journal)
+        letter, num = ver_str.split(".")
+        return letter, int(num)
     except Exception:
-        # If anything goes wrong, just keep in-memory defaults
-        pass
+        return "A", 1
 
 
-def save_state():
-    """Persist key state to JSON file so trades & tickers survive reload/redeploy."""
-    data = {
-        "tickers": st.session_state.tickers,
-        "trades": st.session_state.trades,
-        "ownership": st.session_state.ownership,
-        "leaps": st.session_state.leaps,
-        "leap_fund": st.session_state.leap_fund,
-        "journal": st.session_state.journal,
-    }
+def format_version(letter, num):
+    return f"{letter}.{num:02d}"
+
+
+def increment_version(ver_str):
+    letter, num = parse_version(ver_str)
+    num += 1
+    return format_version(letter, num)
+
+
+def next_baseline_version(ver_str):
+    letter, _ = parse_version(ver_str)
+    new_letter = chr(ord(letter) + 1)
+    return format_version(new_letter, 1)
+
+
+def load_version_info():
+    ver = get_setting("app_version", None)
+    notes_json = get_setting("version_notes", None)
+
+    if ver is None:
+        ver = "A.01"
+        notes = {"A.01": "Initial baseline with live status tracking and iOS-style UI."}
+        set_setting("app_version", ver)
+        set_setting("version_notes", json.dumps(notes))
+        return ver, notes
+
+    if notes_json is None:
+        notes = {ver: "Initial version (notes missing, auto-created)."}
+        set_setting("version_notes", json.dumps(notes))
+        return ver, notes
+
     try:
-        with open(DATA_FILE, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        notes = json.loads(notes_json)
+        if not isinstance(notes, dict):
+            notes = {ver: "Version notes reset due to invalid format."}
     except Exception:
-        # Ignore persistence errors silently
-        pass
+        notes = {ver: "Version notes reset due to JSON error."}
+
+    return ver, notes
 
 
-# Load persisted state once at startup
-load_state()
+def save_version_info(version, notes_dict):
+    set_setting("app_version", version)
+    set_setting("version_notes", json.dumps(notes_dict))
 
-# ==================== FINNHUB HELPERS ====================
 
-def _finnhub_get(path: str, params: dict | None = None):
-    """Generic Finnhub GET helper with API key injection and basic error handling."""
-    if not st.session_state.finnhub_key:
+# ============================================================
+#  FINNHUB HELPERS
+# ============================================================
+
+def _finnhub_get(path, params=None):
+    if params is None:
+        params = {}
+    token = st.session_state.get("finnhub_key", "")
+    if not token:
         return None
     base = "https://finnhub.io/api/v1"
-    params = params or {}
-    params["token"] = st.session_state.finnhub_key
+    params["token"] = token
     try:
-        r = requests.get(f"{base}{path}", params=params, timeout=10)
-        if r.ok:
-            return r.json()
+        resp = requests.get(base + path, params=params, timeout=10)
+        if resp.status_code != 200:
+            return None
+        return resp.json()
     except Exception:
         return None
-    return None
 
 
-def fetch_quote(sym: str):
-    """Fetch latest quote for a symbol."""
-    return _finnhub_get("/quote", {"symbol": sym})
+def fetch_quote(symbol):
+    return _finnhub_get("/quote", {"symbol": symbol})
 
 
-def fetch_candles(sym: str):
-    """Fetch ~40 days of daily candles for realized volatility."""
-    to_ts = int(time.time())
-    from_ts = to_ts - (40 * 86400)
+def fetch_candles(symbol, days=60):
+    now = int(time.time())
+    frm = now - days * 24 * 60 * 60
     data = _finnhub_get(
         "/stock/candle",
-        {"symbol": sym, "resolution": "D", "from": from_ts, "to": to_ts},
+        {"symbol": symbol, "resolution": "D", "from": frm, "to": now},
     )
     if not data or data.get("s") != "ok":
         return None
     df = pd.DataFrame(
         {
-            "time": pd.to_datetime(data["t"], unit="s"),
+            "time": [datetime.fromtimestamp(t) for t in data["t"]],
             "open": data["o"],
             "high": data["h"],
             "low": data["l"],
@@ -261,887 +558,842 @@ def fetch_candles(sym: str):
     return df
 
 
-def calc_rv(df: pd.DataFrame | None):
-    """Annualized realized volatility from daily closes."""
-    if df is None or len(df) < 5:
+def calc_rv(df):
+    if df is None or df.empty:
         return None
-    returns = df["close"].pct_change().dropna()
-    return round(returns.std() * (252 ** 0.5) * 100, 1)
+    closes = df["close"].astype(float)
+    rets = closes.pct_change().dropna()
+    if len(rets) < 2:
+        return None
+    vol = rets.std() * sqrt(252) * 100
+    return float(vol)
 
 
 def fetch_vix():
-    """Fetch VIX index."""
     q = fetch_quote("^VIX")
-    if q and q.get("c"):
-        return round(q["c"], 2)
-    return None
+    if not q:
+        return None
+    return q.get("c")
 
 
-def fetch_economic_calendar(days_ahead: int = 7):
-    """Fetch upcoming economic events (high/medium impact)."""
-    today = datetime.utcnow().date()
-    end = today + timedelta(days=days_ahead)
+def fetch_economic_calendar():
+    today = date.today()
+    to_date = today + timedelta(days=7)
     data = _finnhub_get(
         "/calendar/economic",
-        {"from": today.isoformat(), "to": end.isoformat()},
+        {"from": today.isoformat(), "to": to_date.isoformat()},
     )
     if not data or "economicCalendar" not in data:
         return []
-    events = data["economicCalendar"]
-    df = pd.DataFrame(events)
-    if "impact" in df.columns:
-        df = df[df["impact"].isin(["high", "medium"])].copy()
-    return df.sort_values("time").to_dict(orient="records")
-
-
-def fetch_options_chain(symbol: str):
-    """Fetch full options chain for a symbol."""
-    data = _finnhub_get("/stock/option-chain", {"symbol": symbol})
-    if not data:
-        return None
-    return data
-
-
-def nearest_30d_expiry_from_chain(chain: dict):
-    """Pick expiry closest to 30 days out."""
-    if not chain or "data" not in chain:
-        return None
-    expiries = set()
-    for row in chain["data"]:
-        exp = row.get("expirationDate")
-        if exp:
-            expiries.add(exp)
-    if not expiries:
-        return None
-    target = datetime.utcnow().date() + timedelta(days=30)
-    best = None
-    best_diff = None
-    for e in expiries:
-        try:
-            d = datetime.strptime(e, "%Y-%m-%d").date()
-        except Exception:
+    events = []
+    for ev in data["economicCalendar"]:
+        impact = ev.get("impact")
+        if impact not in ("high", "medium", "High", "Medium"):
             continue
-        diff = abs((d - target).days)
-        if best is None or diff < best_diff:
-            best = e
-            best_diff = diff
-    return best
+        events.append(
+            {
+                "time": ev.get("time", ""),
+                "country": ev.get("country", ""),
+                "event": ev.get("event", ""),
+                "impact": ev.get("impact", ""),
+                "actual": ev.get("actual", ""),
+                "forecast": ev.get("forecast", ""),
+                "previous": ev.get("previous", ""),
+            }
+        )
+    return events
 
+
+# ============================================================
+#  STATE LOADING
+# ============================================================
+
+def load_state_from_db():
+    st.session_state.tickers = load_tickers()
+    if not st.session_state.tickers:
+        for sym in DEFAULT_TICKERS:
+            save_ticker(sym)
+        st.session_state.tickers = load_tickers()
+
+    st.session_state.ownership = load_ownership()
+    st.session_state.trades = load_trades()
+    st.session_state.leaps = load_leaps()
+    st.session_state.journal = load_journal()
+
+    if "market_data" not in st.session_state:
+        st.session_state.market_data = {}
+    if "vix" not in st.session_state:
+        st.session_state.vix = None
+    if "econ_events" not in st.session_state:
+        st.session_state.econ_events = []
+    if "capital" not in st.session_state:
+        st.session_state.capital = DEFAULT_CAPITAL
+    if "leap_fund" not in st.session_state:
+        st.session_state.leap_fund = DEFAULT_LEAP_FUND
+    if "last_refresh" not in st.session_state:
+        st.session_state.last_refresh = 0.0
+
+
+# ============================================================
+#  LIVE STATUS HELPERS
+# ============================================================
+
+def compute_option_unrealized(trade, price):
+    if price is None:
+        return None, None
+
+    entry = trade["entry_premium"]
+    contracts = trade["contracts"]
+    strike = trade["strike"]
+    mult = contracts * 100
+
+    if "Put" in trade["type"]:
+        intrinsic = max(0.0, strike - price)
+    else:
+        intrinsic = max(0.0, price - strike)
+
+    unrealized = entry * mult - intrinsic * mult
+    if entry <= 0:
+        return unrealized, None
+    percent = unrealized / (entry * mult)
+    return unrealized, percent
+
+
+def format_option_status(unrealized, percent):
+    if unrealized is None or percent is None:
+        return "⚪ Status unavailable (no price data)", "gray"
+
+    pct_str = f"{percent*100:.1f}%"
+    if percent >= 0.5:
+        return f"🟢 Target reached (≥50% profit) — Unrealized +${unrealized:,.2f} ({pct_str})", "green"
+    elif percent >= 0:
+        return f"🟢 Profit +${unrealized:,.2f} ({pct_str})", "green"
+    else:
+        return f"🔴 Loss ${unrealized:,.2f} ({pct_str})", "red"
+
+
+def compute_leap_status(leap):
+    cost = leap["cost"]
+    current = leap["current_val"]
+    contracts = leap["contracts"]
+    mult = contracts * 100
+
+    if cost <= 0:
+        return None, None, "⚪ LEAP status unavailable (cost ≤ 0)", "gray"
+
+    unrealized = (current - cost) * mult
+    percent = (current - cost) / cost
+    pct_str = f"{percent*100:.1f}%"
+
+    if percent >= 0.5:
+        text = f"🟢 LEAP target reached (≥50% profit) — Unrealized +${unrealized:,.2f} ({pct_str})"
+        color = "green"
+    elif percent >= 0:
+        text = f"🟢 LEAP profit +${unrealized:,.2f} ({pct_str})"
+        color = "green"
+    else:
+        text = f"🔴 LEAP loss ${unrealized:,.2f} ({pct_str})"
+        color = "red"
+
+    return unrealized, percent, text, color
+
+
+# ============================================================
+#  SAFE REFRESH
+# ============================================================
 
 def safe_batch_update(tickers):
-    """Rate-limited batch update of quotes + RV + VIX + econ calendar."""
-    updated = 0
+    now = time.time()
+    if now - st.session_state.last_refresh < SAFE_REFRESH_MIN_INTERVAL:
+        st.warning("Safe Refresh is limited to once per minute.")
+        return
+
+    st.session_state.last_refresh = now
+
+    market_data = st.session_state.get("market_data", {})
     for sym in tickers:
-        if updated >= MAX_CALLS_PER_MIN:
-            st.warning(
-                f"Reached safe limit ({MAX_CALLS_PER_MIN}/min). Remaining updates will run next minute."
-            )
-            break
-        q = fetch_quote(sym)
-        if q and q.get("c"):
-            df = fetch_candles(sym)
-            rv = calc_rv(df)
-            st.session_state.market_data[sym] = {
-                "price": round(q["c"], 2),
-                "change": round(q.get("dp", 0), 2),
-                "rv": rv,
-            }
-            updated += 2
-            time.sleep(1.2)
+        main_sym = MAIN_TICKER_MAP.get(sym, sym)
+        q = fetch_quote(main_sym)
+        if q:
+            price = q.get("c")
+            prev_close = q.get("pc")
+            if price is not None and prev_close not in (None, 0):
+                chg = (price - prev_close) / prev_close * 100
+            else:
+                chg = None
+        else:
+            price = None
+            chg = None
+
+        df = fetch_candles(main_sym)
+        rv = calc_rv(df) if df is not None else None
+
+        market_data[sym] = {
+            "price": price,
+            "change": chg,
+            "rv": rv,
+        }
+
+    st.session_state.market_data = market_data
+
+    # Update trade history for open trades
+    for t in st.session_state.trades:
+        if t["status"] != "open":
+            continue
+        sym = t["ticker"]
+        md = market_data.get(sym, {})
+        price = md.get("price")
+        if price is None:
+            continue
+        insert_trade_history(t["id"], price)
+        trim_trade_history(t["id"], MAX_HISTORY_ROWS_PER_TRADE)
 
     st.session_state.vix = fetch_vix()
     st.session_state.econ_events = fetch_economic_calendar()
+    st.success("Market data refreshed.")
 
-# ==================== FINNHUB KEY PERSISTENCE (QUERY PARAMS) ====================
 
-if not st.session_state.finnhub_key:
-    qp = st.query_params
-    if "fhk" in qp and qp["fhk"]:
-        st.session_state.finnhub_key = qp["fhk"]
+# ============================================================
+#  STREAMLIT SETUP & STYLING
+# ============================================================
 
-# ==================== FIRST-TIME FINNHUB SETUP ====================
-
-if not st.session_state.finnhub_key:
-    st.title("Welcome to WheelOS")
-    st.markdown("### First Time Setup")
-    st.info("Get your free Finnhub API key at finnhub.io → Dashboard → API Key")
-
-    key = st.text_input("Paste your Finnhub API Key", type="password")
-    if st.button("Save & Launch App", type="primary"):
-        if key.strip():
-            st.session_state.finnhub_key = key.strip()
-            qp = st.query_params
-            qp["fhk"] = st.session_state.finnhub_key
-            st.success("Key saved! Loading app…")
-            st.rerun()
-        else:
-            st.error("Please enter a valid key")
-    st.stop()
-
-# ==================== SIDEBAR ====================
-
-with st.sidebar:
-    st.title("◈ WheelOS")
-    st.success("Finnhub connected")
-
-    if st.session_state.vix is not None:
-        if st.session_state.vix >= VIX_LIMIT:
-            st.error(f"VIX: {st.session_state.vix} (≥ {VIX_LIMIT}) — New trades paused")
-        else:
-            st.metric("VIX", st.session_state.vix)
-    else:
-        st.caption("VIX loading…")
-
-    st.markdown("---")
-    st.markdown("**Discipline Guardrails**")
-    st.caption(
-        "• Only CSP on red days (≤ -5%)\n"
-        "• Close at 50% profit\n"
-        "• 50% income / 50% LEAP fund\n"
-        "• LEAPs = house money only\n"
-        "• Max 5 open positions\n"
-        "• Keep 30%+ cash"
-    )
-
-    if st.button("Reset Finnhub Key", type="secondary"):
-        st.session_state.finnhub_key = ""
-        st.query_params.clear()
-        st.rerun()
-
-# ==================== AUTO REFRESH (15 MIN) ====================
-
-if time.time() - st.session_state.last_refresh > 900:
-    safe_batch_update(st.session_state.tickers)
-    st.session_state.last_refresh = time.time()
-
-# ==================== TABS ====================
-
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-    ["📊 Dashboard", "🔁 CSP & Wheel", "🚀 LEAP Trades", "📈 Super Chart", "📅 Calendar", "⚙️ Settings"]
+st.set_page_config(
+    page_title="WheelOS • Options Radar",
+    page_icon="◈",
+    layout="wide",
 )
 
-# ==================== DASHBOARD TAB ====================
+init_db()
+load_state_from_db()
+app_version, version_notes = load_version_info()
+
+# iOS-like styling
+st.markdown(
+    """
+    <style>
+    body, .stApp {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+        background-color: #f5f5f7;
+    }
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 1.5rem;
+    }
+    .stMetric {
+        background: #ffffff;
+        padding: 0.75rem 1rem;
+        border-radius: 0.75rem;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.04);
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 0.5rem;
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 999px;
+        padding: 0.35rem 0.9rem;
+        background-color: #f2f2f7;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #ffffff !important;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.06);
+    }
+    .status-green {
+        color: #0a7f3f;
+        font-weight: 500;
+    }
+    .status-red {
+        color: #b00020;
+        font-weight: 500;
+    }
+    .status-gray {
+        color: #6e6e73;
+    }
+    .version-footer {
+        font-size: 0.8rem;
+        color: #6e6e73;
+        text-align: center;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ============================================================
+#  SIDEBAR
+# ============================================================
+
+with st.sidebar:
+    st.markdown("### Settings")
+
+    st.session_state.finnhub_key = st.text_input(
+        "Finnhub API Key",
+        type="password",
+        value=st.session_state.get("finnhub_key", ""),
+        help="Used only to fetch market data for your personal tracking.",
+    )
+
+    st.session_state.capital = st.number_input(
+        "Wheel Capital ($)",
+        min_value=0,
+        value=int(st.session_state.get("capital", DEFAULT_CAPITAL)),
+        step=1000,
+    )
+
+    st.session_state.leap_fund = st.number_input(
+        "LEAP Fund ($)",
+        min_value=0,
+        value=int(st.session_state.get("leap_fund", DEFAULT_LEAP_FUND)),
+        step=1000,
+    )
+
+    if st.button("Safe Refresh Prices", type="primary"):
+        safe_batch_update(st.session_state.tickers)
+
+    st.markdown("---")
+    st.markdown("#### Version Controls")
+
+    st.caption(f"Current Version: **{app_version}**")
+
+    with st.form("version_increment_form", clear_on_submit=True):
+        st.write("Increment Version (A.01 → A.02)")
+        inc_note = st.text_input(
+            "One-line summary for new version",
+            placeholder="Describe what changed in this version...",
+        )
+        inc_submit = st.form_submit_button("Increment Version")
+        if inc_submit:
+            if not inc_note.strip():
+                st.warning("Please enter a short summary for this version.")
+            else:
+                new_ver = increment_version(app_version)
+                version_notes[new_ver] = inc_note.strip()
+                app_version = new_ver
+                save_version_info(app_version, version_notes)
+                st.success(f"Version incremented to {app_version}")
+
+    with st.form("version_baseline_form", clear_on_submit=True):
+        st.write("New Baseline Version (A.05 → B.01)")
+        base_note = st.text_input(
+            "One-line summary for new baseline version",
+            placeholder="Describe what changed in this baseline...",
+        )
+        base_submit = st.form_submit_button("New Baseline Version")
+        if base_submit:
+            if not base_note.strip():
+                st.warning("Please enter a short summary for this baseline.")
+            else:
+                new_ver = next_baseline_version(app_version)
+                version_notes[new_ver] = base_note.strip()
+                app_version = new_ver
+                save_version_info(app_version, version_notes)
+                st.success(f"New baseline version set to {app_version}")
+
+# ============================================================
+#  HEADER METRICS
+# ============================================================
+
+st.title("◈ WheelOS — Personal Options Tracking")
+
+col_a, col_b, col_c, col_d = st.columns(4)
+
+with col_a:
+    total_pnl = sum(t["pnl"] for t in st.session_state.trades if t["status"] == "closed")
+    st.metric("Realized P&L", f"${total_pnl:,.2f}")
+
+with col_b:
+    open_trades = [t for t in st.session_state.trades if t["status"] == "open"]
+    st.metric("Open Positions", len(open_trades))
+
+with col_c:
+    st.metric("Wheel Capital", f"${st.session_state.capital:,.0f}")
+
+with col_d:
+    if st.session_state.vix is not None:
+        st.metric("VIX", f"{st.session_state.vix:.2f}")
+    else:
+        st.metric("VIX", "—")
+
+# ============================================================
+#  TABS
+# ============================================================
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Wheel / CSP", "LEAPs", "Super Chart", "Journal", "Settings"]
+)
+
+# ============================================================
+#  TAB 1 — WHEEL / CSP
+# ============================================================
 
 with tab1:
-    st.subheader("Matt’s Profit Recycling Loop")
-    st.info(
-        "CSP on **red days (≤ -5%)** → Close at **50% profit** → "
-        "**50% income**, **50% to LEAP fund (house money only)**."
-    )
+    st.subheader("Wheel / CSP Tracker")
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("House Money", f"${st.session_state.leap_fund:,.0f}")
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("#### Tracked Tickers")
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        new_sym = st.text_input("Add Ticker", placeholder="e.g. TSLL")
+    with c2:
+        if st.button("Add", key="add_ticker_btn"):
+            sym = new_sym.strip().upper()
+            if sym and sym not in st.session_state.tickers:
+                save_ticker(sym)
+                load_state_from_db()
+                st.success(f"Added {sym}")
+            elif sym in st.session_state.tickers:
+                st.info(f"{sym} is already tracked.")
 
-    closed = [t for t in st.session_state.trades if t.get("status") == "closed"]
-    total_pnl = sum(t.get("pnl", 0) for t in closed)
-    win_rate = round(
-        len([t for t in closed if t.get("pnl", 0) > 0]) / len(closed) * 100, 1
-    ) if closed else 0
-    avg_days = round(
-        sum(t.get("days_active", 0) for t in closed) / len(closed), 1
-    ) if closed else 0
-
-    with col2:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Realized P&L", f"${total_pnl:,.0f}")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with col3:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Win Rate", f"{win_rate}%")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with col4:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Avg Days to Close", f"{avg_days} days")
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.write(", ".join(st.session_state.tickers))
 
     st.markdown("---")
 
-    if st.button("🔄 Safe Refresh (≤50 calls/min)", type="primary"):
-        safe_batch_update(st.session_state.tickers)
-        st.success("Batch update completed safely")
-        st.rerun()
-
-    if st.session_state.market_data:
-        st.markdown("#### Live Ticker Snapshot")
-        df_md = pd.DataFrame.from_dict(
-            st.session_state.market_data, orient="index"
-        ).rename(columns={"price": "Price", "change": "Change %", "rv": "Realized Vol %"})
-        st.dataframe(df_md, use_container_width=True)
-    else:
-        st.info("Click **Safe Refresh** to load market data.")
-
-# ==================== CSP & WHEEL TAB ====================
-
-with tab2:
-    st.subheader("CSP Trades • Red Day Sell Put / Assignment → Covered Calls")
-
-    # Basic guardrails
-    open_positions = [t for t in st.session_state.trades if t.get("status") == "open"]
-    num_open = len(open_positions)
-    cash_required = sum(
-        t.get("strike", 0) * 100 for t in open_positions if "Put" in t.get("type", "")
-    )
-    cash_available = st.session_state.capital - cash_required
-    cash_ratio = (
-        cash_available / st.session_state.capital if st.session_state.capital else 1
-    )
-
-    if num_open >= 5:
-        st.error("Max 5 open positions reached — new CSPs are disabled.")
-    if cash_ratio < 0.3:
-        st.warning(
-            f"Cash buffer below 30% (Current: {cash_ratio:.0%}). "
-            "Consider closing or avoiding new positions."
+    st.markdown("#### Ownership")
+    for sym in st.session_state.tickers:
+        owns = st.checkbox(
+            f"Own shares of {sym} (for covered calls)",
+            value=st.session_state.ownership.get(sym, False),
+            key=f"own_{sym}",
         )
-    if st.session_state.vix is not None and st.session_state.vix >= VIX_LIMIT:
-        st.error("VIX is elevated — new CSP/CC trades are paused per rules.")
-
-    today = datetime.utcnow().date()
-
-    # Per-ticker section
-    for ticker in st.session_state.tickers:
-        # Ensure ownership key exists for every ticker (B3, all tickers)
-        if ticker not in st.session_state.ownership:
-            st.session_state.ownership[ticker] = False
-
-        d = st.session_state.market_data.get(ticker, {})
-        price = d.get("price")
-        rv = d.get("rv")
-        chg = d.get("change", 0.0)
-
-        if not price:
-            st.write(f"Waiting for data on {ticker}… (hit Safe Refresh)")
-            continue
-
-        # Determine trade signal (red/green/neutral)
-        if st.session_state.vix is not None and st.session_state.vix >= VIX_LIMIT:
-            signal = "NO TRADE (VIX HIGH)"
-            banner_class = "ticker-banner-gray"
-            call_enabled = False
-            put_enabled = False
-        elif chg <= -MOVE_PCT:
-            signal = "SELL PUT (Red Day)"
-            banner_class = "ticker-banner-red"
-            put_enabled = True
-            call_enabled = False
-        elif chg >= MOVE_PCT:
-            signal = "SELL CALL (Green Day)"
-            banner_class = "ticker-banner-green"
-            put_enabled = False
-            call_enabled = True
-        else:
-            signal = "NO TRADE"
-            banner_class = "ticker-banner-gray"
-            put_enabled = False
-            call_enabled = False
-
-        # Full-width iOS-style banner (C1 + R1 + S1)
-        banner_html = f"""
-        <div class="ticker-banner {banner_class}">
-            <div>{ticker} — {signal}</div>
-            <div class="ticker-banner-label">Δ {chg:.2f}% • ${price:.2f}</div>
-        </div>
-        """
-        st.markdown(banner_html, unsafe_allow_html=True)
-
-        # Ownership toggle (UI-A, O1) — per ticker, under banner
-        own_default = st.session_state.ownership.get(ticker, False)
-        own_checkbox = st.checkbox(
-            f"I own shares of {ticker}",
-            key=f"own_{ticker}",
-            value=own_default,
-        )
-        st.session_state.ownership[ticker] = own_checkbox  # sync to dict
-        save_state()  # ownership change persisted
-
-        # Expander with details + trade logging
-        with st.expander(f"{ticker} details"):
-            st.write(
-                f"Price: **${price}** | Change: **{chg:.2f}%** | "
-                f"RV: **{rv if rv is not None else 'Not loaded yet'}**"
-            )
-            if rv is not None and rv < 50:
-                st.warning("Realized volatility < 50% — system prefers high IV names.")
-            elif rv is None:
-                st.warning("RV data not loaded yet – trading based on price action only.")
-
-            # Options chain preview (no auto premium)
-            main_ticker = MAIN_TICKER_MAP.get(ticker, ticker)
-            chain = fetch_options_chain(main_ticker)
-            expiry_30 = nearest_30d_expiry_from_chain(chain)
-            if chain and expiry_30:
-                st.markdown(
-                    f"**Nearest ~30D Expiry:** `{expiry_30}` (underlying: {main_ticker})"
-                )
-                rows = [
-                    r for r in chain["data"]
-                    if r.get("expirationDate") == expiry_30
-                ]
-                if rows:
-                    df_chain = pd.DataFrame(rows)
-                    cols_to_show = [
-                        "type",
-                        "strike",
-                        "lastPrice",
-                        "bid",
-                        "ask",
-                        "impliedVolatility",
-                        "openInterest",
-                    ]
-                    df_chain = df_chain[cols_to_show].rename(
-                        columns={
-                            "type": "Type",
-                            "strike": "Strike",
-                            "lastPrice": "Last",
-                            "bid": "Bid",
-                            "ask": "Ask",
-                            "impliedVolatility": "IV",
-                            "openInterest": "OI",
-                        }
-                    )
-                    st.dataframe(
-                        df_chain.sort_values(["Type", "Strike"]),
-                        use_container_width=True,
-                        height=260,
-                    )
-                else:
-                    st.info("No options rows found for nearest 30D expiry.")
-            else:
-                st.caption("Options chain not available or limit reached.")
-
-            st.markdown("---")
-            st.markdown("**Log New Trade (Manual Premium)**")
-
-            col_a, col_b = st.columns(2)
-            with col_a:
-                strike_input = st.number_input(
-                    f"{ticker} Strike (approx 10% OTM for CSP)",
-                    min_value=0.0,
-                    value=round(price * 0.9, 2),
-                    step=0.5,
-                    key=f"strike_{ticker}",
-                )
-            with col_b:
-                premium_input = st.number_input(
-                    f"{ticker} Premium per Contract ($)",
-                    min_value=0.01,
-                    value=round(price * 0.05, 2),
-                    step=0.05,
-                    key=f"prem_{ticker}",
-                )
-
-            expiry_date = datetime.utcnow().date() + timedelta(days=30)
-            st.caption(f"Target expiry ~30 DTE: **{expiry_date.isoformat()}**")
-
-            col_btn1, col_btn2 = st.columns(2)
-
-            # --- SELL CSP BUTTON (red day) ---
-            with col_btn1:
-                disabled_put = (
-                    not put_enabled
-                    or num_open >= 5
-                    or (
-                        st.session_state.vix is not None
-                        and st.session_state.vix >= VIX_LIMIT
-                    )
-                )
-                if st.button(
-                    f"Log Sell CSP Put on {ticker}",
-                    key=f"put_{ticker}",
-                    disabled=disabled_put,
-                    type="primary",
-                ):
-                    required = strike_input * 100
-                    if cash_available - required < st.session_state.capital * 0.3:
-                        st.error("This CSP would push cash below 30% — blocked by rules.")
-                    else:
-                        st.session_state.trades.append(
-                            {
-                                "id": int(time.time()),
-                                "type": "CSP Put",
-                                "ticker": ticker,
-                                "strike": float(strike_input),
-                                "expiry": expiry_date.isoformat(),
-                                "entry_premium": float(premium_input),
-                                "status": "open",
-                                "pnl": 0.0,
-                                "opened": datetime.utcnow().strftime("%Y-%m-%d"),
-                                "assigned": False,
-                            }
-                        )
-                        save_state()
-                        st.success("CSP Put logged (red day rule enforced).")
-                        st.rerun()
-
-            # --- COVERED CALL BUTTON (green day, B3 ownership) ---
-            with col_btn2:
-                owns_shares = st.session_state.ownership.get(ticker, False)
-                disabled_call = (
-                    not call_enabled
-                    or not owns_shares
-                    or num_open >= 5
-                    or (
-                        st.session_state.vix is not None
-                        and st.session_state.vix >= VIX_LIMIT
-                    )
-                )
-                if st.button(
-                    f"Log Covered Call on {ticker}",
-                    key=f"cc_{ticker}",
-                    disabled=disabled_call,
-                    type="primary",
-                ):
-                    st.session_state.trades.append(
-                        {
-                            "id": int(time.time()),
-                            "type": "Covered Call",
-                            "ticker": ticker,
-                            "strike": float(round(price * 1.1, 2)),
-                            "expiry": expiry_date.isoformat(),
-                            "entry_premium": float(premium_input),
-                            "status": "open",
-                            "pnl": 0.0,
-                            "opened": datetime.utcnow().strftime("%Y-%m-%d"),
-                            "assigned": False,
-                        }
-                    )
-                    save_state()
-                    st.success("Covered Call logged (ownership + green day).")
-                    st.rerun()
+        st.session_state.ownership[sym] = owns
+        save_ownership(sym, owns)
 
     st.markdown("---")
-    st.subheader("Open Wheel Positions")
 
-    # Auto-assignment + per-trade controls
-    for t in st.session_state.trades:
-        if t.get("status") != "open":
-            continue
+    st.markdown("#### Log New Trade")
 
-        # Auto-detect assignment for CSP near/past expiry (B3)
-        try:
-            expiry_date = datetime.strptime(t["expiry"], "%Y-%m-%d").date()
-        except Exception:
-            expiry_date = today
-
-        if "CSP" in t["type"]:
-            if today >= expiry_date or (expiry_date - today).days <= 1:
-                md = st.session_state.market_data.get(t["ticker"], {})
-                price = md.get("price")
-                if price is not None and price < t["strike"]:
-                    t["assigned"] = True
-                    st.session_state.ownership[t["ticker"]] = True
-                    save_state()
-
-        label = f"{t['ticker']} {t['type']} @ ${t['strike']} (exp {t['expiry']})"
-        with st.expander(label):
-            st.write(f"Entry Premium: **${t.get('entry_premium', '—')}**")
-            st.write(f"Opened: {t.get('opened', '—')}")
-            st.write(f"Assigned (trade-level): **{t.get('assigned', False)}**")
-            st.write(
-                f"Ticker Ownership (B3): **{st.session_state.ownership.get(t['ticker'], False)}**"
-            )
-
-            col1, col2, col3 = st.columns(3)
-
-            # Close at 50% profit (CSP or CC)
-            with col1:
-                if "CSP" in t["type"] or "Covered Call" in t["type"]:
-                    if st.button("Close at 50% Profit", key=f"close50_{t['id']}"):
-                        profit = round(t["entry_premium"] * 0.5, 2)
-                        t["pnl"] = profit
-                        t["status"] = "closed"
-                        t["closed_date"] = datetime.utcnow().strftime("%Y-%m-%d")
-                        income = profit * 0.5
-                        recycled = profit * 0.5
-                        st.session_state.leap_fund += recycled
-
-                        st.session_state.journal.append(
-                            {
-                                "date": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-                                "ticker": t["ticker"],
-                                "type": t["type"],
-                                "action": "Closed at 50%",
-                                "profit": profit,
-                                "note": f"Income: ${income:.2f}, Recycled to LEAP fund: ${recycled:.2f}",
-                            }
-                        )
-                        save_state()
-                        st.success(
-                            f"Closed at 50% profit. "
-                            f"Income: ${income:.2f} • Recycled: ${recycled:.2f} → House Money"
-                        )
-                        st.rerun()
-
-            # Explicit "Mark as Assigned" button (also sets ownership)
-            with col2:
-                if "CSP" in t["type"] and not t.get("assigned", False):
-                    if st.button(
-                        "Mark as Assigned (Shares Received)", key=f"assign_{t['id']}"
-                    ):
-                        t["assigned"] = True
-                        st.session_state.ownership[t["ticker"]] = True
-                        st.session_state.journal.append(
-                            {
-                                "date": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-                                "ticker": t["ticker"],
-                                "type": t["type"],
-                                "action": "Assigned",
-                                "profit": 0.0,
-                                "note": "CSP assigned → shares owned, ready for covered calls.",
-                            }
-                        )
-                        save_state()
-                        st.success(
-                            "Position marked as assigned. Ownership updated for this ticker."
-                        )
-                        st.rerun()
-
-            # Manual close with custom P&L
-            with col3:
-                if st.button("Manual Close (Custom P&L)", key=f"manual_{t['id']}"):
-                    pnl = st.number_input(
-                        "Enter realized P&L for this trade",
-                        key=f"pnl_input_{t['id']}",
-                        value=0.0,
-                    )
-                    confirm = st.button(
-                        "Confirm Manual Close", key=f"confirm_manual_{t['id']}"
-                    )
-                    if confirm:
-                        t["pnl"] = float(pnl)
-                        t["status"] = "closed"
-                        t["closed_date"] = datetime.utcnow().strftime("%Y-%m-%d")
-                        if pnl > 0:
-                            income = pnl * 0.5
-                            recycled = pnl * 0.5
-                            st.session_state.leap_fund += recycled
-                            note = (
-                                f"Manual close. Income: ${income:.2f}, "
-                                f"Recycled: ${recycled:.2f}"
-                            )
-                        else:
-                            note = "Manual close. Loss or zero P&L."
-                        st.session_state.journal.append(
-                            {
-                                "date": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-                                "ticker": t["ticker"],
-                                "type": t["type"],
-                                "action": "Manual Close",
-                                "profit": pnl,
-                                "note": note,
-                            }
-                        )
-                        save_state()
-                        st.success("Trade manually closed and journal updated.")
-                        st.rerun()
-
-# ==================== LEAP TRADES TAB ====================
-
-with tab3:
-    st.subheader("LEAP Calls • House Money Only")
-
-    st.metric("House Money Available", f"${st.session_state.leap_fund:,.0f}")
-
-    st.info(
-        "LEAPs are **long-dated calls (≥ 360 DTE)**, typically **~10% OTM** on quality names "
-        "(QQQ, SOXX, TSLA, NVDA, etc.). Only buy with **house money** from CSP profits."
-    )
-
-    leap_ticker = st.selectbox(
-        "LEAP Ticker", options=list(MAIN_TICKER_MAP.values()), key="leap_sel"
-    )
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        leap_cost = st.number_input(
-            "Cost per LEAP position ($)",
-            min_value=100.0,
-            value=1200.0,
-            step=50.0,
+    col_t1, col_t2, col_t3 = st.columns(3)
+    with col_t1:
+        trade_ticker = st.selectbox(
+            "Ticker",
+            options=st.session_state.tickers,
+            key="trade_ticker",
         )
-    with col2:
+    with col_t2:
+        trade_type = st.selectbox(
+            "Type",
+            options=["Cash-Secured Put", "Covered Call"],
+            key="trade_type",
+        )
+    with col_t3:
         contracts = st.number_input(
             "Contracts",
             min_value=1,
             value=1,
             step=1,
+            key="trade_contracts",
         )
-    with col3:
-        expiry_leap = datetime.utcnow().date() + timedelta(days=365)
-        st.caption(f"Target LEAP expiry ≥ 360 DTE: **{expiry_leap.isoformat()}**")
 
-    if st.button("Add LEAP (House Money Only)", type="primary"):
-        total_cost = leap_cost * contracts
-        if st.session_state.leap_fund >= total_cost:
-            st.session_state.leaps.append(
-                {
-                    "id": int(time.time()),
-                    "ticker": leap_ticker,
-                    "cost": float(total_cost),
-                    "current_val": float(total_cost),
-                    "contracts": int(contracts),
-                    "expiry": expiry_leap.isoformat(),
-                    "opened": datetime.utcnow().strftime("%Y-%m-%d"),
-                }
-            )
-            st.session_state.leap_fund -= total_cost
-            st.session_state.journal.append(
-                {
-                    "date": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-                    "ticker": leap_ticker,
-                    "type": "LEAP",
-                    "action": "Opened",
-                    "profit": 0.0,
-                    "note": f"Opened LEAP with {contracts} contract(s) using house money.",
-                }
-            )
-            save_state()
-            st.success("LEAP added using house money only.")
-            st.rerun()
+    col_t4, col_t5, col_t6 = st.columns(3)
+    with col_t4:
+        strike = st.number_input("Strike", min_value=0.0, step=0.5)
+    with col_t5:
+        entry_premium = st.number_input(
+            "Entry Premium (per contract)",
+            min_value=0.0,
+            step=0.05,
+        )
+    with col_t6:
+        expiry = st.date_input("Expiry")
+
+    if st.button("Add Trade", type="primary", key="add_trade_btn"):
+        if strike <= 0 or entry_premium <= 0:
+            st.error("Strike and premium must be positive.")
         else:
-            st.error("Not enough house money — LEAPs must be funded only from CSP profits.")
+            new_trade = {
+                "ticker": trade_ticker,
+                "type": "CSP Put" if "Put" in trade_type else "Covered Call",
+                "strike": float(strike),
+                "expiry": expiry.isoformat(),
+                "entry_premium": float(entry_premium),
+                "contracts": int(contracts),
+                "status": "open",
+                "pnl": 0.0,
+                "opened": datetime.utcnow().strftime("%Y-%m-%d"),
+                "closed_date": None,
+                "assigned": False,
+            }
+            save_trade(new_trade)
+            load_state_from_db()
+            st.success("Trade logged.")
 
     st.markdown("---")
-    st.subheader("Your LEAP Positions")
 
-    if not st.session_state.leaps:
-        st.info(
-            "No LEAP positions yet. Build CSP profits first, then deploy house money into LEAPs."
-        )
+    st.markdown("### Open Wheel Positions")
+
+    open_trades = [t for t in st.session_state.trades if t["status"] == "open"]
+    if not open_trades:
+        st.info("No open wheel positions.")
     else:
-        for l in st.session_state.leaps:
-            with st.expander(
-                f"{l['ticker']} LEAP — {l['contracts']} contract(s) exp {l['expiry']}"
-            ):
-                st.write(
-                    f"Cost: **${l['cost']}** | Current: **${l['current_val']}** | "
-                    f"Opened: {l.get('opened', '—')}"
-                )
-                if l["cost"] > 0:
-                    profit_pct = ((l["current_val"] - l["cost"]) / l["cost"]) * 100
-                else:
-                    profit_pct = 0.0
-                st.write(f"Unrealized Return: **{profit_pct:.1f}%**")
+        for t in open_trades:
+            label = f"{t['ticker']} {t['type']} @ ${t['strike']} (exp {t['expiry']})"
+            with st.expander(label, expanded=False):
+                col_o1, col_o2, col_o3 = st.columns(3)
+                with col_o1:
+                    st.write(f"**Contracts:** {t['contracts']}")
+                    st.write(f"**Entry Premium:** ${t['entry_premium']:.2f}")
+                    st.write(f"**Strike:** ${t['strike']:.2f}")
+                with col_o2:
+                    md = st.session_state.market_data.get(t["ticker"], {})
+                    price = md.get("price")
+                    chg = md.get("change")
+                    rv = md.get("rv")
+                    st.write(f"**Underlying:** {t['ticker']}")
+                    st.write(f"**Price:** {price if price is not None else '—'}")
+                    st.write(f"**Change:** {f'{chg:.2f}%' if chg is not None else '—'}")
+                    st.write(f"**RV:** {f'{rv:.1f}%' if rv is not None else '—'}")
+                with col_o3:
+                    st.write(f"**Opened:** {t['opened']}")
+                    if t.get("closed_date"):
+                        st.write(f"**Closed:** {t['closed_date']}")
+                    st.write(f"**Realized P&L:** ${t['pnl']:.2f}")
 
-                if profit_pct >= 100:
-                    st.success("🎯 >100% profit – System suggests selling half & recycling.")
+                st.markdown("---")
 
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    if st.button("Update Current Value", key=f"upd_{l['id']}"):
-                        new_val = st.number_input(
-                            "New current value ($)",
-                            value=float(l["current_val"]),
-                            key=f"val_{l['id']}",
+                col_b1, col_b2, col_b3 = st.columns(3)
+                with col_b1:
+                    if st.button(
+                        "Close at 50%",
+                        key=f"close50_{t['id']}",
+                        type="secondary",
+                    ):
+                        realized = t["entry_premium"] * 0.5 * t["contracts"] * 100
+                        t["pnl"] = realized
+                        t["status"] = "closed"
+                        t["closed_date"] = datetime.utcnow().strftime("%Y-%m-%d")
+                        update_trade(t)
+                        save_journal(
+                            {
+                                "date": t["closed_date"],
+                                "ticker": t["ticker"],
+                                "type": t["type"],
+                                "action": "Closed 50%",
+                                "profit": realized,
+                                "note": "",
+                            }
                         )
-                        confirm = st.button(
-                            "Confirm Value Update", key=f"confirm_val_{l['id']}"
-                        )
-                        if confirm:
-                            l["current_val"] = float(new_val)
-                            save_state()
-                            st.success("LEAP value updated.")
-                            st.rerun()
+                        load_state_from_db()
+                        st.success("Trade closed at 50% target.")
 
-                with col_b:
-                    if st.button("Sell Half & Recycle", key=f"sell_half_{l['id']}"):
-                        if l["contracts"] <= 0:
-                            st.warning("No contracts left to sell.")
+                with col_b2:
+                    if st.button(
+                        "Mark Assigned",
+                        key=f"assign_{t['id']}",
+                        type="secondary",
+                    ):
+                        t["assigned"] = True
+                        t["status"] = "closed"
+                        t["closed_date"] = datetime.utcnow().strftime("%Y-%m-%d")
+                        update_trade(t)
+
+                        # Flip ownership based on type
+                        owns = st.session_state.ownership.get(t["ticker"], False)
+                        if "Put" in t["type"]:
+                            # CSP assigned → now own shares
+                            owns = True
                         else:
-                            sell_contracts = max(1, l["contracts"] // 2)
-                            avg_price = l["current_val"] / max(l["contracts"], 1)
-                            proceeds = avg_price * sell_contracts
-                            cost_fraction = l["cost"] * (
-                                sell_contracts / max(l["contracts"], 1)
-                            )
-                            profit = proceeds - cost_fraction
-                            recycled = max(profit, 0) * 0.5
-                            st.session_state.leap_fund += recycled
-                            l["contracts"] -= sell_contracts
-                            l["cost"] -= cost_fraction
-                            l["current_val"] -= avg_price * sell_contracts
+                            # CC assigned → shares called away
+                            owns = False
+                        st.session_state.ownership[t["ticker"]] = owns
+                        save_ownership(t["ticker"], owns)
 
-                            st.session_state.journal.append(
-                                {
-                                    "date": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-                                    "ticker": l["ticker"],
-                                    "type": "LEAP",
-                                    "action": "Sell Half & Recycle",
-                                    "profit": profit,
-                                    "note": f"Sold {sell_contracts} contract(s). Recycled ${recycled:.2f} to LEAP fund.",
-                                }
-                            )
-                            save_state()
-                            st.success(
-                                f"Sold {sell_contracts} contract(s). "
-                                f"Profit: ${profit:.2f} • Recycled: ${recycled:.2f} to House Money."
-                            )
-                            st.rerun()
+                        save_journal(
+                            {
+                                "date": t["closed_date"],
+                                "ticker": t["ticker"],
+                                "type": t["type"],
+                                "action": "Assigned",
+                                "profit": t["pnl"],
+                                "note": "",
+                            }
+                        )
+                        load_state_from_db()
+                        st.success("Trade marked as assigned and ownership updated.")
 
-# ==================== SUPER CHART TAB ====================
+                with col_b3:
+                    manual_pnl = st.number_input(
+                        "Manual P&L ($)",
+                        key=f"manual_pnl_{t['id']}",
+                        value=0.0,
+                    )
+                    if st.button(
+                        "Manual Close",
+                        key=f"manual_close_{t['id']}",
+                        type="secondary",
+                    ):
+                        t["pnl"] = manual_pnl
+                        t["status"] = "closed"
+                        t["closed_date"] = datetime.utcnow().strftime("%Y-%m-%d")
+                        update_trade(t)
+                        save_journal(
+                            {
+                                "date": t["closed_date"],
+                                "ticker": t["ticker"],
+                                "type": t["type"],
+                                "action": "Manual Close",
+                                "profit": manual_pnl,
+                                "note": "",
+                            }
+                        )
+                        load_state_from_db()
+                        st.success("Trade manually closed.")
+
+                st.markdown("---")
+
+                # Live status (bottom)
+                md = st.session_state.market_data.get(t["ticker"], {})
+                price = md.get("price")
+                unrealized, percent = compute_option_unrealized(t, price)
+                status_text, status_color = format_option_status(unrealized, percent)
+                css_class = (
+                    "status-green"
+                    if status_color == "green"
+                    else "status-red"
+                    if status_color == "red"
+                    else "status-gray"
+                )
+                st.markdown(
+                    f'<div class="{css_class}">{status_text}</div>',
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown("---")
+
+                history = load_trade_history(t["id"])
+                if history:
+                    st.markdown("**Price Action While Trade Is Open**")
+                    df_hist = pd.DataFrame(history)
+                    df_hist["timestamp"] = pd.to_datetime(df_hist["timestamp"])
+
+                    st.line_chart(
+                        df_hist.set_index("timestamp")["price"],
+                        height=180,
+                    )
+
+                    st.dataframe(
+                        df_hist.sort_values("timestamp", ascending=False).head(20),
+                        use_container_width=True,
+                        height=220,
+                    )
+                else:
+                    st.caption(
+                        "No price history yet — run Safe Refresh to start tracking this trade."
+                    )
+
+# ============================================================
+#  TAB 2 — LEAPs
+# ============================================================
+
+with tab2:
+    st.subheader("LEAPs Tracker")
+
+    st.markdown("#### Add LEAP Position")
+    l1, l2, l3 = st.columns(3)
+    with l1:
+        leap_ticker = st.selectbox(
+            "Ticker",
+            options=st.session_state.tickers,
+            key="leap_ticker",
+        )
+    with l2:
+        leap_contracts = st.number_input(
+            "Contracts",
+            min_value=1,
+            value=1,
+            step=1,
+            key="leap_contracts",
+        )
+    with l3:
+        leap_expiry = st.date_input("Expiry", key="leap_expiry")
+
+    l4, l5 = st.columns(2)
+    with l4:
+        leap_cost = st.number_input(
+            "Cost (per contract)",
+            min_value=0.0,
+            step=0.05,
+            key="leap_cost",
+        )
+    with l5:
+        leap_current_val = st.number_input(
+            "Current Value (per contract)",
+            min_value=0.0,
+            step=0.05,
+            key="leap_current_val",
+        )
+
+    if st.button("Add LEAP", type="primary", key="add_leap_btn"):
+        if leap_cost <= 0:
+            st.error("Cost must be positive.")
+        else:
+            new_leap = {
+                "ticker": leap_ticker,
+                "cost": float(leap_cost),
+                "current_val": float(leap_current_val),
+                "contracts": int(leap_contracts),
+                "expiry": leap_expiry.isoformat(),
+                "opened": datetime.utcnow().strftime("%Y-%m-%d"),
+            }
+            save_leap(new_leap)
+            load_state_from_db()
+            st.success("LEAP position added.")
+
+    st.markdown("---")
+
+    st.markdown("### Open LEAP Positions")
+    if not st.session_state.leaps:
+        st.info("No LEAP positions logged.")
+    else:
+        rows = []
+        for l in st.session_state.leaps:
+            invested = l["cost"] * l["contracts"] * 100
+            current = l["current_val"] * l["contracts"] * 100
+            pnl = current - invested
+            rows.append(
+                {
+                    "Ticker": l["ticker"],
+                    "Contracts": l["contracts"],
+                    "Expiry": l["expiry"],
+                    "Cost/Contract": l["cost"],
+                    "Current/Contract": l["current_val"],
+                    "Invested ($)": invested,
+                    "Current ($)": current,
+                    "P&L ($)": pnl,
+                }
+            )
+        df_leaps = pd.DataFrame(rows)
+        st.dataframe(df_leaps, use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("#### LEAP Status")
+        for l in st.session_state.leaps:
+            unrealized, percent, text, color = compute_leap_status(l)
+            css_class = (
+                "status-green"
+                if color == "green"
+                else "status-red"
+                if color == "red"
+                else "status-gray"
+            )
+            st.markdown(
+                f'<div class="{css_class}">{l["ticker"]}: {text}</div>',
+                unsafe_allow_html=True,
+            )
+
+# ============================================================
+#  TAB 3 — SUPER CHART
+# ============================================================
+
+with tab3:
+    st.subheader("Super Chart")
+
+    if not st.session_state.tickers:
+        st.info("Add at least one ticker to view charts.")
+    else:
+        sc1, sc2 = st.columns([2, 1])
+        with sc1:
+            chart_ticker = st.selectbox(
+                "Chart Ticker",
+                options=st.session_state.tickers,
+                key="chart_ticker",
+            )
+        with sc2:
+            main_sym = MAIN_TICKER_MAP.get(chart_ticker, chart_ticker)
+            st.caption(f"Underlying used for data: **{main_sym}**")
+
+        df = fetch_candles(main_sym)
+        if df is None or df.empty:
+            st.warning("No candle data available for this symbol.")
+        else:
+            st.line_chart(
+                df.set_index("time")["close"],
+                height=260,
+            )
+            rv = calc_rv(df)
+            if rv is not None:
+                st.caption(f"Realized Volatility (approx): **{rv:.1f}%**")
+
+        st.markdown("---")
+        st.markdown("#### Economic Calendar (High / Medium Impact)")
+        if st.session_state.econ_events:
+            df_econ = pd.DataFrame(st.session_state.econ_events)
+            st.dataframe(
+                df_econ[
+                    [
+                        "time",
+                        "country",
+                        "event",
+                        "impact",
+                        "actual",
+                        "forecast",
+                        "previous",
+                    ]
+                ],
+                use_container_width=True,
+                height=260,
+            )
+        else:
+            st.caption("No upcoming high/medium impact events loaded yet. Run Safe Refresh.")
+
+# ============================================================
+#  TAB 4 — JOURNAL
+# ============================================================
 
 with tab4:
-    st.subheader("TradingView Super Chart")
+    st.subheader("Trade Journal")
 
-    ticker = st.selectbox(
-        "Select Ticker", st.session_state.tickers, key="superchart_ticker"
-    )
-    st.write(f"Showing TradingView chart for **{ticker}**")
-
-    tv_html = f"""
-    <div class="tradingview-widget-container">
-      <div id="tradingview_chart"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-      <script type="text/javascript">
-      new TradingView.widget({{
-          "width": "100%",
-          "height": 650,
-          "symbol": "{ticker}",
-          "interval": "D",
-          "timezone": "Etc/UTC",
-          "theme": "light",
-          "style": "1",
-          "locale": "en",
-          "toolbar_bg": "#f1f3f6",
-          "enable_publishing": false,
-          "allow_symbol_change": true,
-          "studies": [
-              "RSI@tv-basicstudies",
-              "Volume@tv-basicstudies"
-          ],
-          "overrides": {{
-              "paneProperties.background": "#FAFAFA",
-              "paneProperties.vertGridProperties.color": "#E5E7EB",
-              "paneProperties.horzGridProperties.color": "#E5E7EB"
-          }},
-          "container_id": "tradingview_chart"
-      }});
-      </script>
-    </div>
-    """
-    st.components.v1.html(tv_html, height=680, scrolling=True)
-
-# ==================== CALENDAR TAB ====================
-
-with tab5:
-    st.subheader("📅 Upcoming Economic Events")
-    st.info("Avoid new trades on **high VIX (≥25)** or **major economic events**.")
-
-    if not st.session_state.econ_events:
-        st.caption("No events loaded yet. Use Safe Refresh on Dashboard to pull calendar.")
+    if not st.session_state.journal:
+        st.info("No journal entries yet. Closing trades will add entries here.")
     else:
-        df_events = pd.DataFrame(st.session_state.econ_events)
-        rename_map = {
-            "time": "Time",
-            "country": "Country",
-            "event": "Event",
-            "impact": "Impact",
-            "actual": "Actual",
-            "forecast": "Forecast",
-            "previous": "Previous",
-        }
-        df_events = df_events.rename(columns=rename_map)
-        st.dataframe(df_events, use_container_width=True, height=420)
+        df_j = pd.DataFrame(st.session_state.journal)
+        st.dataframe(df_j, use_container_width=True, height=320)
 
-# ==================== SETTINGS TAB ====================
-
-with tab6:
-    st.subheader("⚙️ Settings")
-
-    st.markdown("### Investment Capital")
-    capital_options = [10000, 20000, 30000, 50000, 100000]
-    selected_index = (
-        capital_options.index(st.session_state.capital)
-        if st.session_state.capital in capital_options
-        else 1
-    )
-    selected = st.selectbox(
-        "Select starting capital",
-        capital_options,
-        index=selected_index,
-    )
-    manual = st.number_input(
-        "Or enter custom amount",
-        min_value=5000,
-        value=int(st.session_state.capital),
-        step=1000,
-    )
-    if st.button("Save Capital", type="primary"):
-        st.session_state.capital = (
-            manual if manual != st.session_state.capital else selected
-        )
-        save_state()
-        st.success(f"Capital set to ${st.session_state.capital:,.0f}")
-
-    st.markdown("---")
-    st.markdown("### House Money")
-    st.metric("Current House Money", f"${st.session_state.leap_fund:,.0f}")
-
-    st.markdown("---")
-    st.markdown("### Journal Entries (Closed Trades)")
-
-    if st.session_state.journal:
-        journal_df = pd.DataFrame(st.session_state.journal)
-        st.dataframe(journal_df, use_container_width=True, height=320)
-
-        csv = journal_df.to_csv(index=False).encode("utf-8")
+        csv = df_j.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "⬇️ Export Journal to CSV",
+            "Download Journal as CSV",
             data=csv,
             file_name="wheelos_journal.csv",
             mime="text/csv",
         )
+
+# ============================================================
+#  TAB 5 — SETTINGS (DETAIL)
+# ============================================================
+
+with tab5:
+    st.subheader("App Settings & Version Info")
+
+    st.markdown("### App Version")
+    st.write(f"**Current Version:** {app_version}")
+
+    st.markdown("#### Version Notes (Newest First)")
+    if version_notes:
+        # sort newest first by version string order (approx)
+        # we sort by letter then number descending
+        def sort_key(item):
+            v = item[0]
+            letter, num = parse_version(v)
+            return (ord(letter), num)
+
+        for ver, note in sorted(
+            version_notes.items(), key=sort_key, reverse=True
+        ):
+            st.write(f"- **{ver}** — {note}")
     else:
-        st.info("No closed trades yet.")
+        st.caption("No version notes stored yet.")
 
     st.markdown("---")
-    st.markdown("### Watched Tickers")
+    st.markdown("### Data Notes")
+    st.caption(
+        "All data is stored locally in a SQLite database (`wheelos.db`). "
+        "This app is for personal tracking and journaling only."
+    )
 
-    for t in list(st.session_state.tickers):
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.write(f"• {t}")
-        with col2:
-            if st.button("Remove", key=f"rem_{t}", type="secondary"):
-                if len(st.session_state.tickers) > 1:
-                    st.session_state.tickers.remove(t)
-                    st.session_state.ownership.pop(t, None)
-                    save_state()
-                    st.success(f"Removed {t}")
-                    st.rerun()
-                else:
-                    st.error("Keep at least one ticker.")
+# ============================================================
+#  FOOTER
+# ============================================================
 
-    st.markdown("---")
-    st.markdown("### Add New Ticker")
-
-    new_t = st.text_input("Ticker Symbol").upper().strip()
-    if st.button("Add Ticker", type="primary"):
-        if new_t and new_t not in st.session_state.tickers:
-            q = fetch_quote(new_t)
-            if q and q.get("c"):
-                st.session_state.tickers.append(new_t)
-                st.session_state.ownership[new_t] = False
-                save_state()
-                st.success(f"Added {new_t}")
-                st.rerun()
-            else:
-                st.error("Ticker not found or no data.")
-        else:
-            st.warning("Already watching or empty input.")
-
-    st.markdown("---")
-    st.markdown("### Safe Full Refresh")
-    if st.button("🔄 Safe Full Refresh (≤50 calls/min)", type="primary"):
-        safe_batch_update(st.session_state.tickers)
-        st.success("Safe batch update completed.")
-        st.rerun()
-
-st.caption(
-    "WheelOS • Matt @MarketMovesMatt Strategy • CSP Income + LEAP Growth • House Money Only for LEAPs"
-)
+st.markdown("---")
+latest_note = version_notes.get(app_version, "")
+footer_text = f"WheelOS — Personal options tracking and journaling tool. Version {app_version}"
+if latest_note:
+    footer_text += f" • {latest_note}"
+st.markdown(f'<div class="version-footer">{footer_text}</div>', unsafe_allow_html=True)
