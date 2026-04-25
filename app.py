@@ -457,7 +457,6 @@ def load_trade_history(trade_id):
 # ============================================================
 
 def parse_version(ver_str):
-    # "A.05" -> ("A", 5)
     try:
         letter, num = ver_str.split(".")
         return letter, int(num)
@@ -486,8 +485,8 @@ def load_version_info():
     notes_json = get_setting("version_notes", None)
 
     if ver is None:
-        ver = "A.01"
-        notes = {"A.01": "Initial baseline with live status tracking and iOS-style UI."}
+        ver = "A.02"
+        notes = {"A.02": "Baseline A.02 with reverted layout and live status tracking."}
         set_setting("app_version", ver)
         set_setting("version_notes", json.dumps(notes))
         return ver, notes
@@ -767,7 +766,13 @@ init_db()
 load_state_from_db()
 app_version, version_notes = load_version_info()
 
-# iOS-like styling
+# Force baseline to A.02 if older
+if app_version != "A.02":
+    app_version = "A.02"
+    if "A.02" not in version_notes:
+        version_notes["A.02"] = "Baseline A.02 with reverted layout and live status tracking."
+    save_version_info(app_version, version_notes)
+
 st.markdown(
     """
     <style>
@@ -784,18 +789,6 @@ st.markdown(
         padding: 0.75rem 1rem;
         border-radius: 0.75rem;
         box-shadow: 0 4px 12px rgba(0,0,0,0.04);
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 0.5rem;
-    }
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 999px;
-        padding: 0.35rem 0.9rem;
-        background-color: #f2f2f7;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #ffffff !important;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.06);
     }
     .status-green {
         color: #0a7f3f;
@@ -855,7 +848,7 @@ with st.sidebar:
     st.caption(f"Current Version: **{app_version}**")
 
     with st.form("version_increment_form", clear_on_submit=True):
-        st.write("Increment Version (A.01 → A.02)")
+        st.write("Increment Version (A.02 → A.03, etc.)")
         inc_note = st.text_input(
             "One-line summary for new version",
             placeholder="Describe what changed in this version...",
@@ -872,7 +865,7 @@ with st.sidebar:
                 st.success(f"Version incremented to {app_version}")
 
     with st.form("version_baseline_form", clear_on_submit=True):
-        st.write("New Baseline Version (A.05 → B.01)")
+        st.write("New Baseline Version (A.02 → B.01, etc.)")
         base_note = st.text_input(
             "One-line summary for new baseline version",
             placeholder="Describe what changed in this baseline...",
@@ -887,6 +880,21 @@ with st.sidebar:
                 app_version = new_ver
                 save_version_info(app_version, version_notes)
                 st.success(f"New baseline version set to {app_version}")
+
+    st.markdown("---")
+    st.markdown("#### Version Notes (Newest First)")
+    if version_notes:
+        def sort_key(item):
+            v = item[0]
+            letter, num = parse_version(v)
+            return (ord(letter), num)
+
+        for ver, note in sorted(
+            version_notes.items(), key=sort_key, reverse=True
+        ):
+            st.write(f"- **{ver}** — {note}")
+    else:
+        st.caption("No version notes stored yet.")
 
 # ============================================================
 #  HEADER METRICS
@@ -914,11 +922,11 @@ with col_d:
         st.metric("VIX", "—")
 
 # ============================================================
-#  TABS
+#  TABS (FULL-PAGE STYLE)
 # ============================================================
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["Wheel / CSP", "LEAPs", "Super Chart", "Journal", "Settings"]
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["Wheel / CSP", "LEAPs", "Super Chart", "Journal"]
 )
 
 # ============================================================
@@ -946,15 +954,38 @@ with tab1:
 
     st.markdown("---")
 
-    st.markdown("#### Ownership")
+    st.markdown("#### Ownership (for Covered Calls)")
     for sym in st.session_state.tickers:
         owns = st.checkbox(
-            f"Own shares of {sym} (for covered calls)",
+            f"Own shares of {sym}",
             value=st.session_state.ownership.get(sym, False),
             key=f"own_{sym}",
         )
         st.session_state.ownership[sym] = owns
         save_ownership(sym, owns)
+
+    st.markdown("---")
+
+    st.markdown("#### Market Snapshot (after Safe Refresh)")
+    if st.session_state.market_data:
+        rows = []
+        for sym in st.session_state.tickers:
+            md = st.session_state.market_data.get(sym, {})
+            price = md.get("price")
+            chg = md.get("change")
+            rv = md.get("rv")
+            rows.append(
+                {
+                    "Ticker": sym,
+                    "Price": price if price is not None else "—",
+                    "Change %": f"{chg:.2f}%" if chg is not None else "—",
+                    "RV %": f"{rv:.1f}%" if rv is not None else "—",
+                }
+            )
+        df_snap = pd.DataFrame(rows)
+        st.dataframe(df_snap, use_container_width=True)
+    else:
+        st.caption("Run Safe Refresh to load current prices and volatility.")
 
     st.markdown("---")
 
@@ -993,6 +1024,13 @@ with tab1:
         )
     with col_t6:
         expiry = st.date_input("Expiry")
+
+    # Warning if CC without ownership
+    if "Covered Call" in trade_type and not st.session_state.ownership.get(trade_ticker, False):
+        st.warning(
+            f"You selected a Covered Call on {trade_ticker} but ownership is not checked. "
+            "Update ownership above if you actually hold shares."
+        )
 
     if st.button("Add Trade", type="primary", key="add_trade_btn"):
         if strike <= 0 or entry_premium <= 0:
@@ -1084,13 +1122,10 @@ with tab1:
                         t["closed_date"] = datetime.utcnow().strftime("%Y-%m-%d")
                         update_trade(t)
 
-                        # Flip ownership based on type
                         owns = st.session_state.ownership.get(t["ticker"], False)
                         if "Put" in t["type"]:
-                            # CSP assigned → now own shares
                             owns = True
                         else:
-                            # CC assigned → shares called away
                             owns = False
                         st.session_state.ownership[t["ticker"]] = owns
                         save_ownership(t["ticker"], owns)
@@ -1138,7 +1173,6 @@ with tab1:
 
                 st.markdown("---")
 
-                # Live status (bottom)
                 md = st.session_state.market_data.get(t["ticker"], {})
                 price = md.get("price")
                 unrealized, percent = compute_option_unrealized(t, price)
@@ -1238,7 +1272,7 @@ with tab2:
 
     st.markdown("---")
 
-    st.markdown("### Open LEAP Positions")
+    st.markdown("### LEAP Positions")
     if not st.session_state.leaps:
         st.info("No LEAP positions logged.")
     else:
@@ -1353,39 +1387,6 @@ with tab4:
             file_name="wheelos_journal.csv",
             mime="text/csv",
         )
-
-# ============================================================
-#  TAB 5 — SETTINGS (DETAIL)
-# ============================================================
-
-with tab5:
-    st.subheader("App Settings & Version Info")
-
-    st.markdown("### App Version")
-    st.write(f"**Current Version:** {app_version}")
-
-    st.markdown("#### Version Notes (Newest First)")
-    if version_notes:
-        # sort newest first by version string order (approx)
-        # we sort by letter then number descending
-        def sort_key(item):
-            v = item[0]
-            letter, num = parse_version(v)
-            return (ord(letter), num)
-
-        for ver, note in sorted(
-            version_notes.items(), key=sort_key, reverse=True
-        ):
-            st.write(f"- **{ver}** — {note}")
-    else:
-        st.caption("No version notes stored yet.")
-
-    st.markdown("---")
-    st.markdown("### Data Notes")
-    st.caption(
-        "All data is stored locally in a SQLite database (`wheelos.db`). "
-        "This app is for personal tracking and journaling only."
-    )
 
 # ============================================================
 #  FOOTER
