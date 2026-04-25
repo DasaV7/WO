@@ -1,6 +1,7 @@
 # app.py
 
 import streamlit as st
+import streamlit.components.v1 as components
 import sqlite3
 import requests
 import pandas as pd
@@ -486,7 +487,7 @@ def load_version_info():
 
     if ver is None:
         ver = "A.03"
-        notes = {"A.03": "Baseline A.03 with full-page CSP tab and Super Chart fixes."}
+        notes = {"A.03": "Baseline A.03 with Dashboard tab and TradingView Super Chart."}
         set_setting("app_version", ver)
         set_setting("version_notes", json.dumps(notes))
         return ver, notes
@@ -769,7 +770,7 @@ app_version, version_notes = load_version_info()
 if app_version != "A.03":
     app_version = "A.03"
     if "A.03" not in version_notes:
-        version_notes["A.03"] = "Baseline A.03 with full-page CSP tab and Super Chart fixes."
+        version_notes["A.03"] = "Baseline A.03 with Dashboard tab and TradingView Super Chart."
     save_version_info(app_version, version_notes)
 
 st.markdown(
@@ -804,6 +805,18 @@ st.markdown(
         font-size: 0.8rem;
         color: #6e6e73;
         text-align: center;
+    }
+    .card {
+        background: #ffffff;
+        padding: 1.2rem 1.4rem;
+        border-radius: 1rem;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.06);
+        margin-bottom: 1.2rem;
+    }
+    .section-title {
+        font-size: 1.3rem;
+        font-weight: 600;
+        margin-bottom: 0.6rem;
     }
     </style>
     """,
@@ -896,76 +909,46 @@ with st.sidebar:
         st.caption("No version notes stored yet.")
 
 # ============================================================
-#  HEADER METRICS
+#  TABS (DASHBOARD + OTHERS)
 # ============================================================
 
 st.title("◈ WheelOS — Personal Options Tracking")
 
-col_a, col_b, col_c, col_d = st.columns(4)
-
-with col_a:
-    total_pnl = sum(t["pnl"] for t in st.session_state.trades if t["status"] == "closed")
-    st.metric("Realized P&L", f"${total_pnl:,.2f}")
-
-with col_b:
-    open_trades = [t for t in st.session_state.trades if t["status"] == "open"]
-    st.metric("Open Positions", len(open_trades))
-
-with col_c:
-    st.metric("Wheel Capital", f"${st.session_state.capital:,.0f}")
-
-with col_d:
-    if st.session_state.vix is not None:
-        st.metric("VIX", f"{st.session_state.vix:.2f}")
-    else:
-        st.metric("VIX", "—")
-
-# ============================================================
-#  TABS (FULL-PAGE FEEL)
-# ============================================================
-
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Wheel / CSP", "LEAPs", "Super Chart", "Journal"]
+tab_dash, tab_csp, tab_leaps, tab_chart, tab_journal = st.tabs(
+    ["Dashboard", "Wheel / CSP", "LEAPs", "Super Chart", "Journal"]
 )
 
 # ============================================================
-#  TAB 1 — WHEEL / CSP
+#  DASHBOARD TAB — FULL SCREEN TOP SECTION
 # ============================================================
 
-with tab1:
-    st.subheader("Wheel / CSP Tracker")
+with tab_dash:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Overview</div>', unsafe_allow_html=True)
 
-    st.markdown("### Tracked Tickers")
-    c1, c2 = st.columns([3, 1])
-    with c1:
-        new_sym = st.text_input("Add Ticker", placeholder="e.g. TSLL")
-    with c2:
-        if st.button("Add", key="add_ticker_btn"):
-            sym = new_sym.strip().upper()
-            if sym and sym not in st.session_state.tickers:
-                save_ticker(sym)
-                load_state_from_db()
-                st.success(f"Added {sym}")
-            elif sym in st.session_state.tickers:
-                st.info(f"{sym} is already tracked.")
+    col_a, col_b, col_c, col_d = st.columns(4)
 
-    st.write(", ".join(st.session_state.tickers))
+    with col_a:
+        total_pnl = sum(t["pnl"] for t in st.session_state.trades if t["status"] == "closed")
+        st.metric("Realized P&L", f"${total_pnl:,.2f}")
 
-    st.markdown("---")
+    with col_b:
+        open_trades = [t for t in st.session_state.trades if t["status"] == "open"]
+        st.metric("Open Positions", len(open_trades))
 
-    st.markdown("### Ownership (for Covered Calls)")
-    for sym in st.session_state.tickers:
-        owns = st.checkbox(
-            f"Own shares of {sym}",
-            value=st.session_state.ownership.get(sym, False),
-            key=f"own_{sym}",
-        )
-        st.session_state.ownership[sym] = owns
-        save_ownership(sym, owns)
+    with col_c:
+        st.metric("Wheel Capital", f"${st.session_state.capital:,.0f}")
 
-    st.markdown("---")
+    with col_d:
+        if st.session_state.vix is not None:
+            st.metric("VIX", f"{st.session_state.vix:.2f}")
+        else:
+            st.metric("VIX", "—")
 
-    st.markdown("### Market Snapshot (after Safe Refresh)")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Market Snapshot (after Safe Refresh)</div>', unsafe_allow_html=True)
     if st.session_state.market_data:
         rows = []
         for sym in st.session_state.tickers:
@@ -984,58 +967,120 @@ with tab1:
         df_snap = pd.DataFrame(rows)
         st.dataframe(df_snap, use_container_width=True)
     else:
-        st.caption("Run Safe Refresh to load current prices and volatility.")
+        st.caption("Run Safe Refresh from the sidebar to load current prices and volatility.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("---")
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Economic Calendar (High / Medium Impact)</div>', unsafe_allow_html=True)
+    if st.session_state.econ_events:
+        df_econ = pd.DataFrame(st.session_state.econ_events)
+        st.dataframe(
+            df_econ[
+                [
+                    "time",
+                    "country",
+                    "event",
+                    "impact",
+                    "actual",
+                    "forecast",
+                    "previous",
+                ]
+            ],
+            use_container_width=True,
+            height=260,
+        )
+    else:
+        st.caption("No upcoming high/medium impact events loaded yet. Run Safe Refresh.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("### Log New Trade")
+# ============================================================
+#  TAB 2 — WHEEL / CSP (FULL PAGE)
+# ============================================================
 
-    col_t1, col_t2, col_t3 = st.columns(3)
-    with col_t1:
+with tab_csp:
+    st.subheader("Wheel / CSP Tracker")
+
+    # Tracked Tickers
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Tracked Tickers</div>', unsafe_allow_html=True)
+    new_sym = st.text_input("Add Ticker", placeholder="e.g. TSLL")
+    if st.button("Add Ticker", key="add_ticker_btn"):
+        sym = new_sym.strip().upper()
+        if sym and sym not in st.session_state.tickers:
+            save_ticker(sym)
+            load_state_from_db()
+            st.success(f"Added {sym}")
+        elif sym in st.session_state.tickers:
+            st.info(f"{sym} is already tracked.")
+    if st.session_state.tickers:
+        st.write(", ".join(st.session_state.tickers))
+    else:
+        st.caption("No tickers tracked yet.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Ownership
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Ownership (for Covered Calls)</div>', unsafe_allow_html=True)
+    if st.session_state.tickers:
+        for sym in st.session_state.tickers:
+            owns = st.checkbox(
+                f"Own shares of {sym}",
+                value=st.session_state.ownership.get(sym, False),
+                key=f"own_{sym}",
+            )
+            st.session_state.ownership[sym] = owns
+            save_ownership(sym, owns)
+    else:
+        st.caption("Add tickers above to manage ownership.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Log New Trade
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Log New Trade</div>', unsafe_allow_html=True)
+
+    if st.session_state.tickers:
         trade_ticker = st.selectbox(
             "Ticker",
             options=st.session_state.tickers,
             key="trade_ticker",
         )
-    with col_t2:
-        trade_type = st.selectbox(
-            "Type",
-            options=["Cash-Secured Put", "Covered Call"],
-            key="trade_type",
-        )
-    with col_t3:
-        contracts = st.number_input(
-            "Contracts",
-            min_value=1,
-            value=1,
-            step=1,
-            key="trade_contracts",
-        )
+    else:
+        trade_ticker = st.text_input("Ticker (no tracked tickers yet)", key="trade_ticker_free")
 
-    col_t4, col_t5, col_t6 = st.columns(3)
-    with col_t4:
-        strike = st.number_input("Strike", min_value=0.0, step=0.5)
-    with col_t5:
-        entry_premium = st.number_input(
-            "Entry Premium (per contract)",
-            min_value=0.0,
-            step=0.05,
-        )
-    with col_t6:
-        expiry = st.date_input("Expiry")
+    trade_type = st.selectbox(
+        "Type",
+        options=["Cash-Secured Put", "Covered Call"],
+        key="trade_type",
+    )
+    contracts = st.number_input(
+        "Contracts",
+        min_value=1,
+        value=1,
+        step=1,
+        key="trade_contracts",
+    )
+    strike = st.number_input("Strike", min_value=0.0, step=0.5)
+    entry_premium = st.number_input(
+        "Entry Premium (per contract)",
+        min_value=0.0,
+        step=0.05,
+    )
+    expiry = st.date_input("Expiry")
 
-    if "Covered Call" in trade_type and not st.session_state.ownership.get(trade_ticker, False):
-        st.warning(
-            f"You selected a Covered Call on {trade_ticker} but ownership is not checked. "
-            "Update ownership above if you actually hold shares."
-        )
+    if "Covered Call" in trade_type and st.session_state.tickers:
+        if not st.session_state.ownership.get(trade_ticker, False):
+            st.warning(
+                f"You selected a Covered Call on {trade_ticker} but ownership is not checked. "
+                "Update ownership above if you actually hold shares."
+            )
 
     if st.button("Add Trade", type="primary", key="add_trade_btn"):
         if strike <= 0 or entry_premium <= 0:
             st.error("Strike and premium must be positive.")
         else:
+            ticker_val = trade_ticker.strip().upper()
             new_trade = {
-                "ticker": trade_ticker,
+                "ticker": ticker_val,
                 "type": "CSP Put" if "Put" in trade_type else "Covered Call",
                 "strike": float(strike),
                 "expiry": expiry.isoformat(),
@@ -1050,10 +1095,11 @@ with tab1:
             save_trade(new_trade)
             load_state_from_db()
             st.success("Trade logged.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("---")
-
-    st.markdown("### Open Wheel Positions")
+    # Open Wheel Positions
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Open Wheel Positions</div>', unsafe_allow_html=True)
 
     open_trades = [t for t in st.session_state.trades if t["status"] == "open"]
     if not open_trades:
@@ -1062,28 +1108,25 @@ with tab1:
         for t in open_trades:
             label = f"{t['ticker']} {t['type']} @ ${t['strike']} (exp {t['expiry']})"
             with st.expander(label, expanded=False):
-                col_o1, col_o2, col_o3 = st.columns(3)
-                with col_o1:
-                    st.write(f"**Contracts:** {t['contracts']}")
-                    st.write(f"**Entry Premium:** ${t['entry_premium']:.2f}")
-                    st.write(f"**Strike:** ${t['strike']:.2f}")
-                with col_o2:
-                    md = st.session_state.market_data.get(t["ticker"], {})
-                    price = md.get("price")
-                    chg = md.get("change")
-                    rv = md.get("rv")
-                    st.write(f"**Underlying:** {t['ticker']}")
-                    st.write(f"**Price:** {price if price is not None else '—'}")
-                    st.write(f"**Change:** {f'{chg:.2f}%' if chg is not None else '—'}")
-                    st.write(f"**RV:** {f'{rv:.1f}%' if rv is not None else '—'}")
-                with col_o3:
-                    st.write(f"**Opened:** {t['opened']}")
-                    if t.get("closed_date"):
-                        st.write(f"**Closed:** {t['closed_date']}")
-                    st.write(f"**Realized P&L:** ${t['pnl']:.2f}")
+                st.write(f"**Contracts:** {t['contracts']}")
+                st.write(f"**Entry Premium:** ${t['entry_premium']:.2f}")
+                st.write(f"**Strike:** ${t['strike']:.2f}")
+                st.write(f"**Opened:** {t['opened']}")
+                if t.get("closed_date"):
+                    st.write(f"**Closed:** {t['closed_date']}")
+                st.write(f"**Realized P&L:** ${t['pnl']:.2f}")
+
+                md = st.session_state.market_data.get(t["ticker"], {})
+                price = md.get("price")
+                chg = md.get("change")
+                rv = md.get("rv")
+                st.markdown("---")
+                st.write("**Underlying Snapshot**")
+                st.write(f"- Price: {price if price is not None else '—'}")
+                st.write(f"- Change: {f'{chg:.2f}%' if chg is not None else '—'}")
+                st.write(f"- RV: {f'{rv:.1f}%' if rv is not None else '—'}")
 
                 st.markdown("---")
-
                 col_b1, col_b2, col_b3 = st.columns(3)
                 with col_b1:
                     if st.button(
@@ -1170,9 +1213,6 @@ with tab1:
                         st.success("Trade manually closed.")
 
                 st.markdown("---")
-
-                md = st.session_state.market_data.get(t["ticker"], {})
-                price = md.get("price")
                 unrealized, percent = compute_option_unrealized(t, price)
                 status_text, status_color = format_option_status(unrealized, percent)
                 css_class = (
@@ -1188,18 +1228,15 @@ with tab1:
                 )
 
                 st.markdown("---")
-
                 history = load_trade_history(t["id"])
                 if history:
                     st.markdown("**Price Action While Trade Is Open**")
                     df_hist = pd.DataFrame(history)
                     df_hist["timestamp"] = pd.to_datetime(df_hist["timestamp"])
-
                     st.line_chart(
                         df_hist.set_index("timestamp")["price"],
                         height=180,
                     )
-
                     st.dataframe(
                         df_hist.sort_values("timestamp", ascending=False).head(20),
                         use_container_width=True,
@@ -1210,54 +1247,55 @@ with tab1:
                         "No price history yet — run Safe Refresh to start tracking this trade."
                     )
 
+    st.markdown('</div>', unsafe_allow_html=True)
+
 # ============================================================
-#  TAB 2 — LEAPs
+#  TAB 3 — LEAPs
 # ============================================================
 
-with tab2:
+with tab_leaps:
     st.subheader("LEAPs Tracker")
 
-    st.markdown("### Add LEAP Position")
-    l1, l2, l3 = st.columns(3)
-    with l1:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Add LEAP Position</div>', unsafe_allow_html=True)
+
+    if st.session_state.tickers:
         leap_ticker = st.selectbox(
             "Ticker",
             options=st.session_state.tickers,
             key="leap_ticker",
         )
-    with l2:
-        leap_contracts = st.number_input(
-            "Contracts",
-            min_value=1,
-            value=1,
-            step=1,
-            key="leap_contracts",
-        )
-    with l3:
-        leap_expiry = st.date_input("Expiry", key="leap_expiry")
+    else:
+        leap_ticker = st.text_input("Ticker", key="leap_ticker_free")
 
-    l4, l5 = st.columns(2)
-    with l4:
-        leap_cost = st.number_input(
-            "Cost (per contract)",
-            min_value=0.0,
-            step=0.05,
-            key="leap_cost",
-        )
-    with l5:
-        leap_current_val = st.number_input(
-            "Current Value (per contract)",
-            min_value=0.0,
-            step=0.05,
-            key="leap_current_val",
-        )
+    leap_contracts = st.number_input(
+        "Contracts",
+        min_value=1,
+        value=1,
+        step=1,
+        key="leap_contracts",
+    )
+    leap_expiry = st.date_input("Expiry", key="leap_expiry")
+    leap_cost = st.number_input(
+        "Cost (per contract)",
+        min_value=0.0,
+        step=0.05,
+        key="leap_cost",
+    )
+    leap_current_val = st.number_input(
+        "Current Value (per contract)",
+        min_value=0.0,
+        step=0.05,
+        key="leap_current_val",
+    )
 
     if st.button("Add LEAP", type="primary", key="add_leap_btn"):
         if leap_cost <= 0:
             st.error("Cost must be positive.")
         else:
+            ticker_val = leap_ticker.strip().upper()
             new_leap = {
-                "ticker": leap_ticker,
+                "ticker": ticker_val,
                 "cost": float(leap_cost),
                 "current_val": float(leap_current_val),
                 "contracts": int(leap_contracts),
@@ -1267,10 +1305,10 @@ with tab2:
             save_leap(new_leap)
             load_state_from_db()
             st.success("LEAP position added.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("---")
-
-    st.markdown("### LEAP Positions")
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">LEAP Positions</div>', unsafe_allow_html=True)
     if not st.session_state.leaps:
         st.info("No LEAP positions logged.")
     else:
@@ -1309,70 +1347,61 @@ with tab2:
                 f'<div class="{css_class}">{l["ticker"]}: {text}</div>',
                 unsafe_allow_html=True,
             )
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
-#  TAB 3 — SUPER CHART
+#  TAB 4 — SUPER CHART (TRADINGVIEW, FULL SCREEN FEEL)
 # ============================================================
 
-with tab3:
+with tab_chart:
     st.subheader("Super Chart")
 
-    if not st.session_state.finnhub_key:
-        st.warning("Enter your Finnhub API key in the sidebar to load Super Chart data.")
-    elif not st.session_state.tickers:
+    if not st.session_state.tickers:
         st.info("Add at least one ticker to view charts.")
     else:
-        sc1, sc2 = st.columns([2, 1])
-        with sc1:
-            chart_ticker = st.selectbox(
-                "Chart Ticker",
-                options=st.session_state.tickers,
-                key="chart_ticker",
-            )
-        with sc2:
-            main_sym = MAIN_TICKER_MAP.get(chart_ticker, chart_ticker)
-            st.caption(f"Underlying used for data: **{main_sym}**")
+        chart_ticker = st.selectbox(
+            "Chart Ticker",
+            options=st.session_state.tickers,
+            key="chart_ticker",
+        )
+        main_sym = MAIN_TICKER_MAP.get(chart_ticker, chart_ticker)
+        st.caption(f"Underlying used for chart: **{main_sym}**")
 
-        df = fetch_candles(main_sym)
-        if df is None or df.empty:
-            st.warning("No candle data available for this symbol or API call failed.")
-        else:
-            st.line_chart(
-                df.set_index("time")["close"],
-                height=260,
-            )
-            rv = calc_rv(df)
-            if rv is not None:
-                st.caption(f"Realized Volatility (approx): **{rv:.1f}%**")
-
-        st.markdown("---")
-        st.markdown("#### Economic Calendar (High / Medium Impact)")
-        if st.session_state.econ_events:
-            df_econ = pd.DataFrame(st.session_state.econ_events)
-            st.dataframe(
-                df_econ[
-                    [
-                        "time",
-                        "country",
-                        "event",
-                        "impact",
-                        "actual",
-                        "forecast",
-                        "previous",
-                    ]
-                ],
-                use_container_width=True,
-                height=260,
-            )
-        else:
-            st.caption("No upcoming high/medium impact events loaded yet. Run Safe Refresh.")
+        components.html(
+            f"""
+            <div class="tradingview-widget-container">
+              <div id="tradingview_chart"></div>
+              <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+              <script type="text/javascript">
+              new TradingView.widget({{
+                  "width": "100%",
+                  "height": 650,
+                  "symbol": "{main_sym}",
+                  "interval": "D",
+                  "timezone": "Etc/UTC",
+                  "theme": "light",
+                  "style": "1",
+                  "locale": "en",
+                  "toolbar_bg": "#f1f3f6",
+                  "enable_publishing": false,
+                  "allow_symbol_change": false,
+                  "container_id": "tradingview_chart"
+              }});
+              </script>
+            </div>
+            """,
+            height=650,
+        )
 
 # ============================================================
-#  TAB 4 — JOURNAL
+#  TAB 5 — JOURNAL
 # ============================================================
 
-with tab4:
+with tab_journal:
     st.subheader("Trade Journal")
+
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Journal Entries</div>', unsafe_allow_html=True)
 
     if not st.session_state.journal:
         st.info("No journal entries yet. Closing trades will add entries here.")
@@ -1387,6 +1416,7 @@ with tab4:
             file_name="wheelos_journal.csv",
             mime="text/csv",
         )
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
 #  FOOTER
