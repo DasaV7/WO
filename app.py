@@ -45,6 +45,11 @@ def percent_str(v):
     except Exception:
         return "0.0%"
 
+def nearest(items, key, target):
+    if not items:
+        return None
+    return min(items, key=lambda x: abs(x.get(key, 0) - target))
+
 # ---------------------------
 # Database Layer
 # ---------------------------
@@ -372,24 +377,30 @@ class FinnhubClient:
         return r.json()
 
     def fetch_quote(self, symbol: str) -> Dict[str, Any]:
-        return self._finnhub_get("quote", {"symbol": symbol})
+        try:
+            return self._finnhub_get("quote", {"symbol": symbol})
+        except Exception:
+            return {}
 
     def fetch_candles(self, symbol: str, days: int = 40) -> pd.DataFrame:
-        end = int(time.time())
-        start = end - days * 24 * 3600
-        data = self._finnhub_get("stock/candle", {"symbol": symbol, "resolution": "D", "from": start, "to": end})
-        if not data or data.get("s") != "ok":
+        try:
+            end = int(time.time())
+            start = end - days * 24 * 3600
+            data = self._finnhub_get("stock/candle", {"symbol": symbol, "resolution": "D", "from": start, "to": end})
+            if not data or data.get("s") != "ok":
+                return pd.DataFrame()
+            df = pd.DataFrame({
+                "t": data["t"],
+                "o": data["o"],
+                "h": data["h"],
+                "l": data["l"],
+                "c": data["c"],
+                "v": data["v"]
+            })
+            df["date"] = pd.to_datetime(df["t"], unit="s")
+            return df
+        except Exception:
             return pd.DataFrame()
-        df = pd.DataFrame({
-            "t": data["t"],
-            "o": data["o"],
-            "h": data["h"],
-            "l": data["l"],
-            "c": data["c"],
-            "v": data["v"]
-        })
-        df["date"] = pd.to_datetime(df["t"], unit="s")
-        return df
 
     def calc_rv(self, df: pd.DataFrame) -> Optional[float]:
         if df is None or df.empty:
@@ -414,6 +425,29 @@ class FinnhubClient:
         except Exception:
             return {}
 
+    def fetch_options_chain(self, symbol: str) -> Dict[str, Any]:
+        """
+        Attempt to fetch options chain. Finnhub's public endpoints vary by plan.
+        We'll try a few plausible endpoints and return structured data if available.
+        If not available, return empty dict.
+        """
+        try:
+            # Try option chain endpoint (may not exist for all accounts)
+            data = self._finnhub_get("stock/option-chain", {"symbol": symbol})
+            if data:
+                return data
+        except Exception:
+            pass
+        try:
+            # Try options by symbol (alternate)
+            data = self._finnhub_get("stock/options", {"symbol": symbol})
+            if data:
+                return data
+        except Exception:
+            pass
+        # If not available, return empty
+        return {}
+
 # ---------------------------
 # Safe Refresh System
 # ---------------------------
@@ -427,10 +461,17 @@ def safe_refresh_all(client: FinnhubClient):
             quote = client.fetch_quote(sym)
             candles = client.fetch_candles(sym, days=40)
             rv = client.calc_rv(candles)
+            # options chain attempt (may be empty)
+            options = {}
+            try:
+                options = client.fetch_options_chain(sym)
+            except Exception:
+                options = {}
             st.session_state.market_data[sym] = {
                 "quote": quote,
                 "candles": candles,
                 "rv": rv,
+                "options": options,
                 "last_refresh": now_iso()
             }
             refreshed["tickers"].append(sym)
@@ -518,6 +559,271 @@ def assign_trade(trade_id: int):
     return True
 
 # ---------------------------
+# Option helpers and suggestion logic
+# ---------------------------
+def parse_options_from_finnhub(options_raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Normalize Finnhub options response into a list of option dicts:
+    Each dict: { 'symbol', 'type' ('call'/'put'), 'strike', 'expiry', 'bid', 'ask', 'volume', 'openInterest' }
+    The exact structure depends on the returned payload; handle common shapes.
+    """
+    opts = []
+    if not options_raw:
+        return opts
+    # Common shapes: options_raw may contain 'data' or 'options' or 'optionChain'
+    candidates = []
+    if isinstance(options_raw, dict):
+        for key in ["data", "options", "optionChain", "option_chain", "result"]:
+            if key in options_raw and isinstance(options_raw[key], list):
+                candidates = options_raw[key]
+                break
+        # Some APIs return nested expiries mapping
+        if not candidates:
+            # try to flatten if keys are expiries
+            for k, v in options_raw.items():
+                if isinstance(v, list):
+                    candidates.extend(v)
+    elif isinstance(options_raw, list):
+        candidates = options_raw
+    # Try to map fields
+    for item in candidates:
+        try:
+            # item may already be normalized
+            strike = item.get("strike") or item.get("strikePrice") or item.get("K") or item.get("strike_price")
+            expiry = item.get("expiry") or item.get("expirationDate") or item.get("expiration")
+            typ = item.get("type") or item.get("optionType") or item.get("side")
+            bid = item.get("bid") or item.get("b")
+            ask = item.get("ask") or item.get("a")
+            vol = item.get("volume") or item.get("v") or item.get("volume24h")
+            oi = item.get("openInterest") or item.get("oi")
+            symbol = item.get("symbol") or item.get("optionSymbol") or item.get("s")
+            if strike is None or expiry is None:
+                # try nested
+                if isinstance(item, dict):
+                    for v in item.values():
+                        if isinstance(v, dict):
+                            strike = strike or v.get("strike")
+                            expiry = expiry or v.get("expiry")
+            if strike is None or expiry is None:
+                continue
+            # normalize
+            strike_f = safe_float(strike)
+            # expiry to ISO date
+            try:
+                if isinstance(expiry, (int, float)):
+                    expiry_dt = datetime.datetime.utcfromtimestamp(int(expiry)).date().isoformat()
+                else:
+                    expiry_dt = parse_date(str(expiry))
+                    expiry_dt = expiry_dt.date().isoformat() if expiry_dt else str(expiry)
+            except Exception:
+                expiry_dt = str(expiry)
+            typ_norm = str(typ).lower() if typ else ""
+            if "c" == typ_norm or "call" in typ_norm:
+                typ_norm = "call"
+            elif "p" == typ_norm or "put" in typ_norm:
+                typ_norm = "put"
+            else:
+                # try to infer from symbol
+                if symbol and "C" in symbol:
+                    typ_norm = "call"
+                elif symbol and "P" in symbol:
+                    typ_norm = "put"
+            opts.append({
+                "symbol": symbol,
+                "type": typ_norm,
+                "strike": strike_f,
+                "expiry": expiry_dt,
+                "bid": safe_float(bid, None) if bid is not None else None,
+                "ask": safe_float(ask, None) if ask is not None else None,
+                "volume": int(vol) if vol not in (None, "") else None,
+                "openInterest": int(oi) if oi not in (None, "") else None
+            })
+        except Exception:
+            continue
+    return opts
+
+def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) -> pd.DataFrame:
+    """
+    Returns a DataFrame with:
+    - current_price
+    - atm_strike, atm_bid, atm_ask, atm_spread, atm_volume, atm_expiry
+    - suggestion_strike_10pct_otm, suggestion_type (put/call), suggestion_bid, suggestion_ask, suggestion_spread, suggestion_volume, suggestion_expiry
+    """
+    row = {
+        "ticker": sym,
+        "current_price": None,
+        "day_color": None,
+        "atm_strike": None,
+        "atm_bid": None,
+        "atm_ask": None,
+        "atm_spread": None,
+        "atm_volume": None,
+        "atm_expiry": None,
+        "suggestion_type": None,
+        "suggestion_strike": None,
+        "suggestion_bid": None,
+        "suggestion_ask": None,
+        "suggestion_spread": None,
+        "suggestion_volume": None,
+        "suggestion_expiry": None
+    }
+    # get market data from session if present
+    md = st.session_state.market_data.get(sym, {}) if "market_data" in st.session_state else {}
+    quote = md.get("quote") if md else None
+    if client and (not md or not quote):
+        try:
+            quote = client.fetch_quote(sym)
+        except Exception:
+            quote = quote or {}
+    price = None
+    prev_close = None
+    if quote:
+        price = quote.get("c") or quote.get("pc") or quote.get("current") or quote.get("last")
+        prev_close = quote.get("pc") or quote.get("previousClose") or None
+    if price is None:
+        # try to fetch from session or leave None
+        price = None
+    row["current_price"] = price
+    # determine day color: red if price < prev_close, green otherwise (if prev_close available)
+    if price is not None and prev_close is not None:
+        try:
+            if price < prev_close:
+                row["day_color"] = "red"
+            else:
+                row["day_color"] = "green"
+        except Exception:
+            row["day_color"] = None
+    else:
+        row["day_color"] = None
+
+    # gather options list
+    options_list = []
+    # prefer session options if present
+    if md and md.get("options"):
+        options_list = parse_options_from_finnhub(md.get("options"))
+    # else try client
+    if not options_list and client:
+        try:
+            raw = client.fetch_options_chain(sym)
+            options_list = parse_options_from_finnhub(raw)
+        except Exception:
+            options_list = []
+    # If still empty, return row as DataFrame with blanks
+    if not options_list:
+        return pd.DataFrame([row])
+
+    # normalize expiry dates to date objects for calculations
+    for o in options_list:
+        try:
+            o["expiry_date"] = parse_date(o["expiry"])
+            if isinstance(o["expiry_date"], datetime.datetime):
+                o["expiry_date"] = o["expiry_date"].date()
+        except Exception:
+            o["expiry_date"] = None
+
+    # find latest expiry available (max date)
+    expiries = sorted({o["expiry_date"] for o in options_list if o["expiry_date"]})
+    latest_expiry = expiries[-1] if expiries else None
+
+    # ATM strike for latest expiry: choose option with expiry == latest_expiry and strike nearest to price
+    atm = None
+    if price is not None and latest_expiry:
+        candidates = [o for o in options_list if o["expiry_date"] == latest_expiry]
+        if candidates:
+            atm = nearest(candidates, "strike", price)
+    # If no latest expiry or price, fallback to nearest expiry to today
+    if atm is None and price is not None:
+        # pick expiry closest to today
+        today = datetime.date.today()
+        candidates = [o for o in options_list if o["expiry_date"]]
+        if candidates:
+            # choose expiry with min abs(days)
+            expiry_choice = min(expiries, key=lambda d: abs((d - today).days)) if expiries else None
+            if expiry_choice:
+                cands = [o for o in options_list if o["expiry_date"] == expiry_choice]
+                if cands:
+                    atm = nearest(cands, "strike", price)
+
+    if atm:
+        row["atm_strike"] = atm.get("strike")
+        row["atm_bid"] = atm.get("bid")
+        row["atm_ask"] = atm.get("ask")
+        try:
+            if atm.get("bid") is not None and atm.get("ask") is not None:
+                row["atm_spread"] = (atm.get("ask") - atm.get("bid"))
+        except Exception:
+            row["atm_spread"] = None
+        row["atm_volume"] = atm.get("volume")
+        row["atm_expiry"] = atm.get("expiry")
+
+    # Suggestion logic for 30DTE and 10% OTM
+    # find expiry closest to ~30 days from today
+    today = datetime.date.today()
+    target_days = 30
+    expiry_30 = None
+    if expiries:
+        expiry_30 = min(expiries, key=lambda d: abs((d - today).days - target_days))
+    # compute 10% OTM strike
+    suggestion = None
+    if price is not None and expiry_30:
+        if row["day_color"] == "red":
+            # sell put 10% OTM -> strike = price * 0.9 (rounded to nearest available strike)
+            target_strike_val = round(price * 0.9, 2)
+            candidates = [o for o in options_list if o["expiry_date"] == expiry_30 and o["type"] == "put"]
+            if candidates:
+                suggestion = nearest(candidates, "strike", target_strike_val)
+                suggestion_type = "put"
+        else:
+            # green or unknown -> sell call 10% OTM -> strike = price * 1.1
+            target_strike_val = round(price * 1.1, 2)
+            candidates = [o for o in options_list if o["expiry_date"] == expiry_30 and o["type"] == "call"]
+            if candidates:
+                suggestion = nearest(candidates, "strike", target_strike_val)
+                suggestion_type = "call"
+    # If no expiry_30 or no suggestion found, attempt to find any near-30D option across expiries
+    if suggestion is None and price is not None:
+        # search across expiries for nearest DTE ~30 and appropriate side
+        best = None
+        best_score = None
+        for o in options_list:
+            if not o.get("expiry_date"):
+                continue
+            dte = (o["expiry_date"] - today).days
+            if dte < 0:
+                continue
+            # choose side based on day color
+            side = "put" if row["day_color"] == "red" else "call"
+            if row["day_color"] is None:
+                # if unknown, prefer put for red fallback
+                side = "put"
+            if o["type"] != side:
+                continue
+            # target strike
+            target_strike_val = price * (0.9 if side == "put" else 1.1)
+            strike_diff = abs(o["strike"] - target_strike_val)
+            score = abs(dte - target_days) + strike_diff / max(1.0, price)
+            if best_score is None or score < best_score:
+                best_score = score
+                best = o
+        suggestion = best
+        suggestion_type = best.get("type") if best else None
+
+    if suggestion:
+        row["suggestion_type"] = suggestion_type
+        row["suggestion_strike"] = suggestion.get("strike")
+        row["suggestion_bid"] = suggestion.get("bid")
+        row["suggestion_ask"] = suggestion.get("ask")
+        try:
+            if suggestion.get("bid") is not None and suggestion.get("ask") is not None:
+                row["suggestion_spread"] = suggestion.get("ask") - suggestion.get("bid")
+        except Exception:
+            row["suggestion_spread"] = None
+        row["suggestion_volume"] = suggestion.get("volume")
+        row["suggestion_expiry"] = suggestion.get("expiry")
+
+    return pd.DataFrame([row])
+
+# ---------------------------
 # UI Helpers
 # ---------------------------
 def tradingview_widget(symbol: str, width="100%", height=650):
@@ -541,7 +847,7 @@ if "finnhub_client" not in st.session_state:
 
 st.set_page_config(page_title="WheelOS", layout="wide", initial_sidebar_state="expanded")
 
-# If we have an API key and tickers but no market data, attempt a gentle initial load (safe, wrapped)
+# Gentle initial load if API key present and tickers exist
 try:
     if st.session_state.finnhub_client and not st.session_state.market_data:
         tickers_exist = db_list_tickers()
@@ -550,7 +856,6 @@ try:
                 safe_refresh_all(st.session_state.finnhub_client)
                 st.session_state.last_safe_refresh = now_iso()
             except Exception:
-                # swallow errors on initial load to avoid breaking UI
                 pass
 except Exception:
     pass
@@ -582,7 +887,6 @@ with st.sidebar:
     st.markdown("### Version Controls")
     cur_version = db_get_setting("app_version", DEFAULT_VERSION)
     st.write(f"**Current version:** {cur_version}")
-    # Increment and baseline use text_input + button pattern to avoid immediate rerun issues
     inc_note = st.text_input("Increment note (one-line)", key="inc_note_input")
     if st.button("Increment Version"):
         if inc_note and inc_note.strip():
@@ -676,7 +980,6 @@ with tab_dashboard:
                 else:
                     st.write("Price unavailable for live status.")
                 cols_act = st.columns(3)
-                # Close at 50% action
                 if cols_act[0].button("Close at 50%", key=f"close50_{tr['id']}"):
                     if price is not None:
                         calc = compute_intrinsic_and_unrealized(tr, price)
@@ -684,16 +987,12 @@ with tab_dashboard:
                         db_manual_close_trade(tr["id"], pnl)
                         db_add_journal(now_iso(), tr["ticker"], tr["type"], "closed_at_50", pnl, "Closed at 50% target")
                         st.success("Trade closed at 50% target.")
-                    else:
-                        st.warning("Price unavailable to compute close.")
-                # Mark Assigned
                 if cols_act[1].button("Mark Assigned", key=f"assign_{tr['id']}"):
                     ok = assign_trade(tr["id"])
                     if ok:
                         st.success("Trade marked assigned and ownership flipped accordingly.")
                     else:
                         st.error("Failed to mark assigned.")
-                # Manual Close opens a small form
                 if cols_act[2].button("Manual Close", key=f"manual_btn_{tr['id']}"):
                     st.session_state[f"manual_open_{tr['id']}"] = True
                 if st.session_state.get(f"manual_open_{tr['id']}", False):
@@ -739,6 +1038,25 @@ with tab_wheel:
             # update ownership only when changed
             if checked != owns:
                 db_set_ownership(sym, bool(checked))
+
+            # Under each ticker, show options table with ATM and suggestion
+            st.markdown(f"**Options snapshot for {sym}**")
+            client = st.session_state.finnhub_client
+            try:
+                opt_df = build_options_table_for_ticker(sym, client)
+                # display nicely
+                if not opt_df.empty:
+                    display_df = opt_df.copy()
+                    # format numeric columns
+                    for col in ["current_price", "atm_strike", "atm_bid", "atm_ask", "atm_spread", "atm_volume", "suggestion_strike", "suggestion_bid", "suggestion_ask", "suggestion_spread", "suggestion_volume"]:
+                        if col in display_df.columns:
+                            display_df[col] = display_df[col].apply(lambda x: round(x, 2) if isinstance(x, (int, float)) else x)
+                    st.table(display_df.T.rename(columns={0: sym}))
+                else:
+                    st.write("No options data available for this ticker.")
+            except Exception as e:
+                st.write("Error building options snapshot:", e)
+
     else:
         st.info("No tickers. Add one above.")
 
