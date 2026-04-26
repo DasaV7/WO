@@ -8,14 +8,13 @@ import json
 import datetime
 from typing import Optional, Dict, Any, List
 import math
-import threading
 import html
 
 # ---------------------------
 # Constants and Config
 # ---------------------------
 DB_PATH = "wheelos.db"
-DEFAULT_VERSION = "A.01"
+DEFAULT_VERSION = "A.03"
 CALLS_PER_MIN_LIMIT = 50
 TRADE_HISTORY_MAX = 300
 
@@ -121,7 +120,7 @@ def init_db():
         cur.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("app_version", DEFAULT_VERSION))
     cur.execute("SELECT value FROM settings WHERE key='version_notes'")
     if cur.fetchone() is None:
-        cur.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("version_notes", json.dumps({DEFAULT_VERSION: "Initial baseline"})))
+        cur.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("version_notes", json.dumps({DEFAULT_VERSION: {"note": "Initial baseline", "timestamp": now_iso()}})))
     conn.commit()
     conn.close()
 
@@ -282,7 +281,6 @@ def db_get_setting_json(key, default=None):
 # Versioning System
 # ---------------------------
 def increment_version(version: str) -> str:
-    # A.01 -> A.02 ; A.09 -> A.10 ; A.99 -> A.100
     parts = version.split(".")
     if len(parts) == 2:
         major = parts[0]
@@ -296,13 +294,10 @@ def increment_version(version: str) -> str:
     return version
 
 def new_baseline_version(version: str) -> str:
-    # A.05 -> B.01 ; Z.99 -> AA.01 (simple increment of letter(s))
     parts = version.split(".")
     major = parts[0]
     minor = parts[1] if len(parts) > 1 else "01"
-    # increment major alphabetically
     def inc_alpha(s):
-        # treat as base26 letters
         s = s.upper()
         res = []
         carry = 1
@@ -331,12 +326,21 @@ def add_version_note(version, note):
     db_set_setting("version_notes", json.dumps(notes))
 
 def get_version_notes_sorted():
-    notes = db_get_setting_json("version_notes", {})
-    if not notes:
+    notes_raw = db_get_setting_json("version_notes", {})
+    if not notes_raw or not isinstance(notes_raw, dict):
         return []
-    items = [(k, v) for k, v in notes.items()]
-    # sort by timestamp desc
-    items.sort(key=lambda x: x[1].get("timestamp", ""), reverse=True)
+    items = []
+    for k, v in notes_raw.items():
+        if isinstance(v, dict):
+            note_text = v.get("note", "") if v.get("note", "") is not None else ""
+            ts = v.get("timestamp", "") if v.get("timestamp", "") is not None else ""
+        else:
+            # legacy string value
+            note_text = str(v)
+            ts = ""
+        items.append((k, {"note": note_text, "timestamp": ts}))
+    # sort by timestamp desc (empty timestamps go last)
+    items.sort(key=lambda x: x[1].get("timestamp") or "", reverse=True)
     return items
 
 # ---------------------------
@@ -349,7 +353,6 @@ class FinnhubClient:
         self._call_timestamps = []
 
     def _rate_ok(self):
-        # simple sliding window
         now_ts = time.time()
         self._call_timestamps = [t for t in self._call_timestamps if now_ts - t < 60]
         return len(self._call_timestamps) < CALLS_PER_MIN_LIMIT
@@ -365,19 +368,15 @@ class FinnhubClient:
         url = f"{self.base}/{path}"
         params = params or {}
         params["token"] = self.api_key
-        try:
-            r = requests.get(url, params=params, timeout=10)
-            self._record_call()
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            raise
+        r = requests.get(url, params=params, timeout=10)
+        self._record_call()
+        r.raise_for_status()
+        return r.json()
 
     def fetch_quote(self, symbol: str) -> Dict[str, Any]:
         return self._finnhub_get("quote", {"symbol": symbol})
 
     def fetch_candles(self, symbol: str, days: int = 40) -> pd.DataFrame:
-        # fetch daily candles for last `days`
         end = int(time.time())
         start = end - days * 24 * 3600
         data = self._finnhub_get("stock/candle", {"symbol": symbol, "resolution": "D", "from": start, "to": end})
@@ -402,12 +401,10 @@ class FinnhubClient:
         std = df["ret"].std()
         if pd.isna(std):
             return None
-        # annualized
         rv = std * (252 ** 0.5)
         return float(rv)
 
     def fetch_vix(self) -> Dict[str, Any]:
-        # VIX symbol on finnhub is ^VIX or VIX? Use ^VIX
         try:
             return self.fetch_quote("^VIX")
         except Exception:
@@ -423,7 +420,6 @@ class FinnhubClient:
 # Safe Refresh System
 # ---------------------------
 def safe_refresh_all(client: FinnhubClient):
-    # Fetch for each ticker: quote, candles, rv
     if "market_data" not in st.session_state:
         st.session_state.market_data = {}
     tickers = [t["symbol"] for t in db_list_tickers()]
@@ -442,8 +438,7 @@ def safe_refresh_all(client: FinnhubClient):
             refreshed["tickers"].append(sym)
         except Exception as e:
             refreshed["errors"].append({"symbol": sym, "error": str(e)})
-        time.sleep(0.1)  # small pause to be gentle
-    # For each open trade, log latest price to trade_history
+        time.sleep(0.1)
     open_trades = db_list_trades(open_only=True)
     for tr in open_trades:
         sym = tr["ticker"]
@@ -459,7 +454,6 @@ def safe_refresh_all(client: FinnhubClient):
                 db_add_trade_history(trade_id, now_iso(), price)
         except Exception:
             pass
-    # Refresh VIX and economic calendar
     try:
         vix = client.fetch_vix()
         st.session_state.market_data["__VIX__"] = {"quote": vix, "last_refresh": now_iso()}
@@ -481,9 +475,9 @@ def compute_intrinsic_and_unrealized(trade: Dict[str, Any], price: float) -> Dic
     entry_premium = safe_float(trade.get("entry_premium", 0.0))
     contracts = int(trade.get("contracts", 0) or 0)
     intrinsic = 0.0
-    if "csp" in ttype or "put" in ttype.lower():
+    if "csp" in ttype or "put" in ttype:
         intrinsic = max(0.0, strike - price)
-    elif "cc" in ttype or "call" in ttype.lower():
+    elif "cc" in ttype or "call" in ttype:
         intrinsic = max(0.0, price - strike)
     unrealized = entry_premium * 100 * contracts - intrinsic * 100 * contracts
     denom = entry_premium * 100 * contracts
@@ -501,7 +495,6 @@ def status_text_for_percent(percent: float) -> str:
 # Assignment Logic
 # ---------------------------
 def assign_trade(trade_id: int):
-    # mark assigned, flip ownership, add journal entry
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM trades WHERE id=?", (trade_id,))
@@ -511,18 +504,15 @@ def assign_trade(trade_id: int):
         return False
     ticker = tr["ticker"]
     ttype = tr["type"].lower()
-    # close trade
     closed_date = now_iso()
     cur.execute("UPDATE trades SET status='closed', closed_date=?, assigned=1 WHERE id=?", (closed_date, trade_id))
-    # flip ownership
     if "csp" in ttype or "put" in ttype:
         owns = 1
     elif "cc" in ttype or "call" in ttype:
         owns = 0
     else:
-        owns = db_get_ownership(ticker)
+        owns = 1 if db_get_ownership(ticker) else 0
     cur.execute("INSERT OR REPLACE INTO ownership(ticker, owns_shares) VALUES(?,?)", (ticker, owns))
-    # journal entry
     cur.execute("INSERT INTO journal(date,ticker,type,action,profit,note) VALUES(?,?,?,?,?,?)",
                 (now_iso(), ticker, tr["type"], "assigned", tr["pnl"] or 0.0, f"Assigned on {closed_date}"))
     conn.commit()
@@ -533,7 +523,6 @@ def assign_trade(trade_id: int):
 # UI Helpers
 # ---------------------------
 def tradingview_widget(symbol: str, width="100%", height=650):
-    # Use TradingView widget embed
     safe_symbol = html.escape(symbol)
     widget = f"""
     <iframe src="https://s.tradingview.com/widgetembed/?frameElementId=tradingview_{safe_symbol}&symbol={safe_symbol}&interval=D&hidesidetoolbar=1&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=[]" style="width:{width};height:{height}px;border:0;"></iframe>
@@ -549,11 +538,9 @@ if "market_data" not in st.session_state:
 if "last_safe_refresh" not in st.session_state:
     st.session_state.last_safe_refresh = None
 if "finnhub_client" not in st.session_state:
-    st.session_state.finnhub_client = None
+    stored_key = db_get_setting("finnhub_api_key")
+    st.session_state.finnhub_client = FinnhubClient(stored_key) if stored_key else None
 
-# ---------------------------
-# Streamlit App
-# ---------------------------
 st.set_page_config(page_title="WheelOS", layout="wide", initial_sidebar_state="expanded")
 
 # Sidebar - Settings and Controls
@@ -562,6 +549,7 @@ with st.sidebar:
     api_key = st.text_input("Finnhub API Key", value=db_get_setting("finnhub_api_key") or "", type="password")
     if st.button("Save API Key"):
         db_set_setting("finnhub_api_key", api_key)
+        st.session_state.finnhub_client = FinnhubClient(api_key) if api_key else None
         st.success("API key saved.")
     wheel_capital = st.number_input("Wheel Capital", value=float(db_get_setting("wheel_capital") or 10000.0), step=100.0)
     db_set_setting("wheel_capital", str(wheel_capital))
@@ -570,7 +558,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Safe Refresh")
     if st.button("Safe Refresh Now"):
-        client = FinnhubClient(api_key or db_get_setting("finnhub_api_key"))
+        client = st.session_state.finnhub_client or FinnhubClient(api_key or db_get_setting("finnhub_api_key"))
         st.session_state.finnhub_client = client
         try:
             res = safe_refresh_all(client)
@@ -609,32 +597,30 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("WheelOS — Personal tracking tool")
 
-# Main layout
-st.title("WheelOS")
-cols = st.columns([1,1,1,1])
-with cols[0]:
-    realized_pnl = sum([t.get("pnl") or 0.0 for t in db_list_trades(open_only=False)])
-    st.metric("Realized P/L", f"${realized_pnl:,.2f}")
-with cols[1]:
-    open_positions = len(db_list_trades(open_only=True))
-    st.metric("Open Positions", f"{open_positions}")
-with cols[2]:
-    st.metric("Wheel Capital", f"${float(db_get_setting('wheel_capital') or 0):,.2f}")
-with cols[3]:
-    vix_quote = st.session_state.market_data.get("__VIX__", {}).get("quote", {})
-    vix_val = vix_quote.get("c") if vix_quote else None
-    st.metric("VIX", f"{vix_val if vix_val is not None else '—'}")
-
-# Tabs
+# Tabs (tab titles at top)
 tab_names = ["Dashboard", "Wheel / CSP", "LEAPs", "Super Chart", "Journal", "Settings"]
 tabs = st.tabs(tab_names)
 tab_dashboard, tab_wheel, tab_leaps, tab_chart, tab_journal, tab_settings = tabs
 
 # ---------------------------
-# Dashboard Tab
+# Dashboard Tab (moved header/metrics here)
 # ---------------------------
 with tab_dashboard:
     st.header("Dashboard")
+    cols = st.columns([1,1,1,1])
+    with cols[0]:
+        realized_pnl = sum([t.get("pnl") or 0.0 for t in db_list_trades(open_only=False)])
+        st.metric("Realized P/L", f"${realized_pnl:,.2f}")
+    with cols[1]:
+        open_positions = len(db_list_trades(open_only=True))
+        st.metric("Open Positions", f"{open_positions}")
+    with cols[2]:
+        st.metric("Wheel Capital", f"${float(db_get_setting('wheel_capital') or 0):,.2f}")
+    with cols[3]:
+        vix_quote = st.session_state.market_data.get("__VIX__", {}).get("quote", {})
+        vix_val = vix_quote.get("c") if vix_quote else None
+        st.metric("VIX", f"{vix_val if vix_val is not None else '—'}")
+
     st.markdown("#### Market Snapshot")
     md = st.session_state.market_data
     if md:
@@ -668,7 +654,6 @@ with tab_dashboard:
                 st.write(f"**Underlying price:** {price if price is not None else '—'}")
                 rv = st.session_state.market_data.get(sym, {}).get("rv")
                 st.write(f"**RV:** {rv:.4f}" if rv else "**RV:** —")
-                # Live status
                 if price is not None:
                     calc = compute_intrinsic_and_unrealized(tr, price)
                     st.write(f"**Intrinsic:** ${calc['intrinsic']:.2f}")
@@ -677,25 +662,21 @@ with tab_dashboard:
                     st.markdown(f"**Status:** {status_text_for_percent(calc['percent'])}")
                 else:
                     st.write("Price unavailable for live status.")
-                # Action buttons
-                cols = st.columns(3)
-                if cols[0].button("Close at 50%", key=f"close50_{tr['id']}"):
-                    # compute pnl based on percent >= 0.5 target
+                cols_act = st.columns(3)
+                if cols_act[0].button("Close at 50%", key=f"close50_{tr['id']}"):
                     if price is not None:
                         calc = compute_intrinsic_and_unrealized(tr, price)
-                        # realized pnl = unrealized (approx)
                         pnl = calc["unrealized"]
                         db_manual_close_trade(tr["id"], pnl)
                         db_add_journal(now_iso(), tr["ticker"], tr["type"], "closed_at_50", pnl, "Closed at 50% target")
                         st.experimental_rerun()
                     else:
                         st.warning("Price unavailable to compute close.")
-                if cols[1].button("Mark Assigned", key=f"assign_{tr['id']}"):
+                if cols_act[1].button("Mark Assigned", key=f"assign_{tr['id']}"):
                     assign_trade(tr["id"])
                     st.success("Trade marked assigned and ownership flipped accordingly.")
                     st.experimental_rerun()
-                if cols[2].button("Manual Close", key=f"manual_{tr['id']}"):
-                    # prompt for pnl
+                if cols_act[2].button("Manual Close", key=f"manual_{tr['id']}"):
                     pnl_in = st.number_input("Enter realized P/L", key=f"pnl_input_{tr['id']}")
                     if st.button("Confirm Manual Close", key=f"confirm_manual_{tr['id']}"):
                         db_manual_close_trade(tr["id"], pnl_in)
@@ -732,16 +713,15 @@ with tab_wheel:
             owns = db_get_ownership(sym)
             col1, col2 = st.columns([3,1])
             col1.write(f"**{sym}**")
-            if col2.checkbox("Owns shares", value=owns, key=f"own_{sym}"):
-                db_set_ownership(sym, True)
-            else:
-                db_set_ownership(sym, False)
+            checked = col2.checkbox("Owns shares", value=owns, key=f"own_{sym}")
+            db_set_ownership(sym, bool(checked))
     else:
         st.info("No tickers. Add one above.")
 
     st.markdown("### Log New Trade")
     with st.form("log_trade"):
-        t_ticker = st.selectbox("Ticker", [t["symbol"] for t in db_list_tickers()] or [""])
+        ticker_list = [t["symbol"] for t in db_list_tickers()] or [""]
+        t_ticker = st.selectbox("Ticker", ticker_list)
         t_type = st.selectbox("Type", ["CSP Put", "Covered Call"])
         t_strike = st.number_input("Strike", value=0.0)
         t_expiry = st.date_input("Expiry")
@@ -759,21 +739,18 @@ with tab_wheel:
         for tr in open_trades:
             with st.expander(f"Trade #{tr['id']} — {tr['ticker']} — {tr['type']}"):
                 st.write(tr)
-                # price chart small
                 sym = tr["ticker"]
                 candles = st.session_state.market_data.get(sym, {}).get("candles")
                 if isinstance(candles, pd.DataFrame) and not candles.empty:
                     st.line_chart(candles.set_index("date")["c"].tail(60))
                 else:
                     st.write("Price history not available.")
-                # trade history
                 hist = db_get_trade_history(tr["id"])
                 if hist:
                     dfh = pd.DataFrame(hist)
                     st.dataframe(dfh.head(10))
                 else:
                     st.write("No trade history yet.")
-                # live status bottom
                 price = st.session_state.market_data.get(sym, {}).get("quote", {}).get("c")
                 if price is not None:
                     calc = compute_intrinsic_and_unrealized(tr, price)
@@ -835,7 +812,6 @@ with tab_chart:
         st.components.v1.html(tradingview_widget(sel), height=700)
     except Exception:
         st.write("Unable to render TradingView widget in this environment.")
-    # Show RV and economic calendar
     rv = st.session_state.market_data.get(sel, {}).get("rv")
     if rv:
         st.write(f"RV (annualized): {rv:.4f}")
@@ -843,7 +819,6 @@ with tab_chart:
     if econ:
         st.markdown("#### Economic Calendar (sample)")
         try:
-            # show first 10 events if present
             events = econ.get("economicCalendar", []) if isinstance(econ, dict) else econ
             if isinstance(events, list) and events:
                 df = pd.DataFrame(events).head(10)
@@ -891,8 +866,8 @@ with tab_settings:
     notes = get_version_notes_sorted()
     if notes:
         for ver, meta in notes:
-            ts = meta.get("timestamp")
-            note = meta.get("note")
+            ts = meta.get("timestamp", "")
+            note = meta.get("note", "")
             st.write(f"- **{ver}** ({ts}): {note}")
     else:
         st.write("No version notes.")
@@ -915,7 +890,7 @@ with tab_settings:
         conn.close()
 
 # ---------------------------
-# Footer
+# Footer (Dashboard shows header; footer remains global)
 # ---------------------------
 st.markdown("---")
 cur_version = db_get_setting("app_version", DEFAULT_VERSION)
