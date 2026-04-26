@@ -14,7 +14,7 @@ import html
 # Constants and Config
 # ---------------------------
 DB_PATH = "wheelos.db"
-DEFAULT_VERSION = "A.04"
+DEFAULT_VERSION = "A.06"
 CALLS_PER_MIN_LIMIT = 50
 TRADE_HISTORY_MAX = 300
 YAHOO_OPTIONS_BASE = "https://query1.finance.yahoo.com/v7/finance/options"
@@ -564,11 +564,13 @@ def parse_options_from_finnhub(options_raw: Dict[str, Any]) -> List[Dict[str, An
     return opts
 
 # ---------------------------
-# Safe Refresh System
+# Safe Refresh System (with debug logging)
 # ---------------------------
 def safe_refresh_all(client: Optional[FinnhubClient]):
     if "market_data" not in st.session_state:
         st.session_state.market_data = {}
+    if "options_debug" not in st.session_state:
+        st.session_state.options_debug = {}
     tickers = [t["symbol"] for t in db_list_tickers()]
     refreshed = {"tickers": [], "errors": []}
     for sym in tickers:
@@ -576,7 +578,9 @@ def safe_refresh_all(client: Optional[FinnhubClient]):
             quote = {}
             candles = pd.DataFrame()
             rv = None
-            options = {}
+            options_raw = {}
+            source = "none"
+            raw_size = 0
             if client:
                 try:
                     quote = client.fetch_quote(sym) or {}
@@ -591,17 +595,42 @@ def safe_refresh_all(client: Optional[FinnhubClient]):
                 except Exception:
                     rv = None
                 try:
-                    options = client.fetch_options_chain(sym) or {}
+                    options_raw = client.fetch_options_chain(sym) or {}
+                    if options_raw:
+                        source = "finnhub"
                 except Exception:
-                    options = {}
-            if not options:
+                    options_raw = {}
+            # fallback to Yahoo if no options from finnhub
+            if not options_raw:
                 yahoo_raw = fetch_options_yahoo(sym)
-                options = yahoo_raw or {}
+                if yahoo_raw:
+                    options_raw = yahoo_raw
+                    source = "yahoo"
+            try:
+                raw_size = len(json.dumps(options_raw)) if options_raw else 0
+            except Exception:
+                raw_size = 0
             st.session_state.market_data[sym] = {
                 "quote": quote,
                 "candles": candles,
                 "rv": rv,
-                "options": options,
+                "options": options_raw,
+                "last_refresh": now_iso()
+            }
+            # parse counts for debug
+            opts_parsed = []
+            if source == "finnhub":
+                opts_parsed = parse_options_from_finnhub(options_raw)
+            elif source == "yahoo":
+                opts_parsed = parse_options_from_yahoo(options_raw)
+            options_count = len(opts_parsed)
+            expiries = sorted({parse_date(o.get("expiry")) for o in opts_parsed if parse_date(o.get("expiry"))})
+            expiries_count = len(expiries)
+            st.session_state.options_debug[sym] = {
+                "source": source,
+                "raw_size": raw_size,
+                "options_count": options_count,
+                "expiries_count": expiries_count,
                 "last_refresh": now_iso()
             }
             refreshed["tickers"].append(sym)
@@ -692,7 +721,7 @@ def assign_trade(trade_id: int):
     return True
 
 # ---------------------------
-# Option table builder (ATM + suggestion)
+# Option table builder (ATM + suggestion, debug fields)
 # ---------------------------
 def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) -> pd.DataFrame:
     row = {
@@ -700,13 +729,15 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
         "current_price": None,
         "prev_close": None,
         "day_color": None,
+        "options_count": 0,
+        "expiries_count": 0,
         "atm_strike": None,
         "atm_bid": None,
         "atm_ask": None,
         "atm_spread": None,
         "atm_volume": None,
         "atm_expiry": None,
-        "suggestion_type": None,
+        "suggestion_action": None,
         "suggestion_strike": None,
         "suggestion_bid": None,
         "suggestion_ask": None,
@@ -731,23 +762,51 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
         row["day_color"] = None
 
     options_list = []
-    if md and md.get("options"):
-        raw = md.get("options")
-        if isinstance(raw, dict) and raw.get("optionChain"):
-            options_list = parse_options_from_yahoo(raw)
+    raw = md.get("options") if md else None
+    source = "none"
+    if raw:
+        parsed = parse_options_from_finnhub(raw)
+        if parsed:
+            options_list = parsed
+            source = "finnhub_session"
         else:
-            options_list = parse_options_from_finnhub(raw)
+            parsed = parse_options_from_yahoo(raw)
+            if parsed:
+                options_list = parsed
+                source = "yahoo_session"
     if not options_list and client:
         try:
-            raw = client.fetch_options_chain(sym)
-            options_list = parse_options_from_finnhub(raw)
+            raw_client = client.fetch_options_chain(sym) or {}
+            parsed = parse_options_from_finnhub(raw_client)
+            if parsed:
+                options_list = parsed
+                source = "finnhub_api"
+            else:
+                parsed = parse_options_from_yahoo(raw_client)
+                if parsed:
+                    options_list = parsed
+                    source = "yahoo_like_api"
         except Exception:
             options_list = []
     if not options_list:
         yahoo_raw = fetch_options_yahoo(sym)
-        options_list = parse_options_from_yahoo(yahoo_raw)
+        parsed = parse_options_from_yahoo(yahoo_raw)
+        if parsed:
+            options_list = parsed
+            source = "yahoo_api"
+
+    row["options_count"] = len(options_list)
 
     if not options_list:
+        # record debug info in session
+        if "options_debug" not in st.session_state:
+            st.session_state.options_debug = {}
+        st.session_state.options_debug[sym] = {
+            "source": source,
+            "options_count": row["options_count"],
+            "expiries_count": 0,
+            "last_refresh": now_iso()
+        }
         return pd.DataFrame([row])
 
     for o in options_list:
@@ -757,6 +816,7 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
             o["expiry_date"] = None
 
     expiries = sorted({o["expiry_date"] for o in options_list if o["expiry_date"]})
+    row["expiries_count"] = len(expiries)
     latest_expiry = expiries[-1] if expiries else None
 
     atm = None
@@ -764,15 +824,12 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
         candidates = [o for o in options_list if o["expiry_date"] == latest_expiry]
         if candidates:
             atm = nearest(candidates, "strike", price)
-    if atm is None and price is not None:
+    if atm is None and price is not None and expiries:
         today = datetime.date.today()
-        candidates = [o for o in options_list if o["expiry_date"]]
-        if candidates:
-            expiry_choice = min(expiries, key=lambda d: abs((d - today).days)) if expiries else None
-            if expiry_choice:
-                cands = [o for o in options_list if o["expiry_date"] == expiry_choice]
-                if cands:
-                    atm = nearest(cands, "strike", price)
+        expiry_choice = min(expiries, key=lambda d: abs((d - today).days))
+        cands = [o for o in options_list if o["expiry_date"] == expiry_choice]
+        if cands:
+            atm = nearest(cands, "strike", price)
 
     if atm:
         row["atm_strike"] = atm.get("strike")
@@ -784,7 +841,11 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
         except Exception:
             row["atm_spread"] = None
         row["atm_volume"] = atm.get("volume")
-        row["atm_expiry"] = atm.get("expiry")
+        try:
+            exp_dt = parse_date(atm.get("expiry"))
+            row["atm_expiry"] = exp_dt.isoformat() if exp_dt else (atm.get("expiry") or None)
+        except Exception:
+            row["atm_expiry"] = atm.get("expiry") or None
 
     today = datetime.date.today()
     target_days = 30
@@ -796,13 +857,13 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
     if price is not None and expiry_30:
         if row["day_color"] == "red":
             target_strike_val = round(price * 0.9, 2)
-            candidates = [o for o in options_list if o["expiry_date"] == expiry_30 and o["type"] == "put"]
+            candidates = [o for o in options_list if o["expiry_date"] == expiry_30 and o.get("type") == "put"]
             if candidates:
                 suggestion = nearest(candidates, "strike", target_strike_val)
                 suggestion_type = "put"
         else:
             target_strike_val = round(price * 1.1, 2)
-            candidates = [o for o in options_list if o["expiry_date"] == expiry_30 and o["type"] == "call"]
+            candidates = [o for o in options_list if o["expiry_date"] == expiry_30 and o.get("type") == "call"]
             if candidates:
                 suggestion = nearest(candidates, "strike", target_strike_val)
                 suggestion_type = "call"
@@ -818,10 +879,10 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
             side = "put" if row["day_color"] == "red" else "call"
             if row["day_color"] is None:
                 side = "put"
-            if o["type"] != side:
+            if o.get("type") != side:
                 continue
             target_strike_val = price * (0.9 if side == "put" else 1.1)
-            strike_diff = abs(o["strike"] - target_strike_val)
+            strike_diff = abs(o.get("strike", 0) - target_strike_val)
             score = abs(dte - target_days) + strike_diff / max(1.0, price)
             if best_score is None or score < best_score:
                 best_score = score
@@ -830,7 +891,7 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
         suggestion_type = best.get("type") if best else None
 
     if suggestion:
-        row["suggestion_type"] = suggestion_type
+        row["suggestion_action"] = f"Sell {suggestion_type.capitalize()}" if suggestion_type else None
         row["suggestion_strike"] = suggestion.get("strike")
         row["suggestion_bid"] = suggestion.get("bid")
         row["suggestion_ask"] = suggestion.get("ask")
@@ -840,7 +901,21 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
         except Exception:
             row["suggestion_spread"] = None
         row["suggestion_volume"] = suggestion.get("volume")
-        row["suggestion_expiry"] = suggestion.get("expiry")
+        try:
+            exp_dt = parse_date(suggestion.get("expiry"))
+            row["suggestion_expiry"] = exp_dt.isoformat() if exp_dt else (suggestion.get("expiry") or None)
+        except Exception:
+            row["suggestion_expiry"] = suggestion.get("expiry") or None
+
+    # record debug info in session
+    if "options_debug" not in st.session_state:
+        st.session_state.options_debug = {}
+    st.session_state.options_debug[sym] = {
+        "source": source,
+        "options_count": row["options_count"],
+        "expiries_count": row["expiries_count"],
+        "last_refresh": now_iso()
+    }
 
     return pd.DataFrame([row])
 
@@ -865,6 +940,8 @@ if "last_safe_refresh" not in st.session_state:
 if "finnhub_client" not in st.session_state:
     stored_key = db_get_setting("finnhub_api_key")
     st.session_state.finnhub_client = FinnhubClient(stored_key) if stored_key else None
+if "options_debug" not in st.session_state:
+    st.session_state.options_debug = {}
 
 st.set_page_config(page_title="WheelOS", layout="wide", initial_sidebar_state="expanded")
 
@@ -932,6 +1009,10 @@ with st.sidebar:
         for s in ["AAPL", "MSFT", "SPY"]:
             db_add_ticker(s)
         st.success("Added AAPL, MSFT, SPY")
+    st.markdown("---")
+    st.markdown("### Debug Mode")
+    debug_mode = st.checkbox("Show options debug in Settings", value=False)
+    st.session_state["debug_mode"] = debug_mode
     st.markdown("---")
     st.markdown("WheelOS — Personal tracking tool")
 
@@ -1004,289 +1085,3 @@ with tab_dashboard:
                 if cols_act[0].button("Close at 50%", key=f"close50_{tr['id']}"):
                     if price is not None:
                         calc = compute_intrinsic_and_unrealized(tr, price)
-                        pnl = calc["unrealized"]
-                        db_manual_close_trade(tr["id"], pnl)
-                        db_add_journal(now_iso(), tr["ticker"], tr["type"], "closed_at_50", pnl, "Closed at 50% target")
-                        st.success("Trade closed at 50% target.")
-                if cols_act[1].button("Mark Assigned", key=f"assign_{tr['id']}"):
-                    ok = assign_trade(tr["id"])
-                    if ok:
-                        st.success("Trade marked assigned and ownership flipped accordingly.")
-                    else:
-                        st.error("Failed to mark assigned.")
-                if cols_act[2].button("Manual Close", key=f"manual_btn_{tr['id']}"):
-                    st.session_state[f"manual_open_{tr['id']}"] = True
-                if st.session_state.get(f"manual_open_{tr['id']}", False):
-                    with st.form(f"manual_close_form_{tr['id']}"):
-                        pnl_in = st.number_input("Enter realized P/L", key=f"pnl_input_{tr['id']}")
-                        confirm = st.form_submit_button("Confirm Manual Close")
-                        if confirm:
-                            db_manual_close_trade(tr["id"], pnl_in)
-                            db_add_journal(now_iso(), tr["ticker"], tr["type"], "manual_close", pnl_in, "Manual close by user")
-                            st.success("Manual close recorded.")
-                            st.session_state[f"manual_open_{tr['id']}"] = False
-
-    st.markdown("#### Recent Journal Entries")
-    jrows = db_list_journal()
-    if jrows:
-        dfj = pd.DataFrame(jrows)
-        st.dataframe(dfj.head(20))
-    else:
-        st.info("No journal entries yet.")
-
-# ---------------------------
-# Wheel / CSP Tab (consolidated options table)
-# ---------------------------
-with tab_wheel:
-    st.header("Wheel / CSP")
-    st.markdown("### Add Ticker")
-    with st.form("add_ticker_form"):
-        new_ticker = st.text_input("Ticker symbol")
-        submitted = st.form_submit_button("Add Ticker")
-        if submitted and new_ticker:
-            db_add_ticker(new_ticker.strip().upper())
-            st.success(f"Ticker {new_ticker.strip().upper()} added.")
-
-    st.markdown("### Ownership")
-    tickers = db_list_tickers()
-    if tickers:
-        client = st.session_state.finnhub_client
-        missing = [t["symbol"] for t in tickers if t["symbol"] not in st.session_state.market_data]
-        if missing:
-            try:
-                safe_refresh_all(client)
-            except Exception:
-                pass
-
-        # Ownership toggles
-        for t in tickers:
-            sym = t["symbol"]
-            owns = db_get_ownership(sym)
-            col1, col2 = st.columns([3,1])
-            col1.write(f"**{sym}**")
-            checked = col2.checkbox("Owns shares", value=owns, key=f"own_{sym}")
-            if checked != owns:
-                db_set_ownership(sym, bool(checked))
-
-        st.markdown("### Options Snapshot (consolidated)")
-        rows = []
-        for t in tickers:
-            sym = t["symbol"]
-            try:
-                df_row = build_options_table_for_ticker(sym, client)
-                if not df_row.empty:
-                    rows.append(df_row.iloc[0].to_dict())
-            except Exception:
-                continue
-        if rows:
-            consolidated = pd.DataFrame(rows)
-            # Format numeric columns
-            num_cols = ["current_price", "prev_close", "atm_strike", "atm_bid", "atm_ask", "atm_spread", "atm_volume",
-                        "suggestion_strike", "suggestion_bid", "suggestion_ask", "suggestion_spread", "suggestion_volume"]
-            for col in num_cols:
-                if col in consolidated.columns:
-                    consolidated[col] = consolidated[col].apply(lambda x: round(x, 2) if isinstance(x, (int, float)) else x)
-            # Add a human-friendly DTE for suggestion_expiry and atm_expiry
-            def dte_from_iso(iso):
-                try:
-                    if not iso:
-                        return None
-                    d = parse_date(iso)
-                    if not d:
-                        return None
-                    return (d - datetime.date.today()).days
-                except Exception:
-                    return None
-            consolidated["atm_dte"] = consolidated["atm_expiry"].apply(lambda x: dte_from_iso(x) if x is not None else None)
-            consolidated["suggestion_dte"] = consolidated["suggestion_expiry"].apply(lambda x: dte_from_iso(x) if x is not None else None)
-            # Reorder columns for readability
-            cols_order = ["ticker", "current_price", "prev_close", "day_color",
-                          "atm_expiry", "atm_dte", "atm_strike", "atm_bid", "atm_ask", "atm_spread", "atm_volume",
-                          "suggestion_type", "suggestion_expiry", "suggestion_dte", "suggestion_strike", "suggestion_bid", "suggestion_ask", "suggestion_spread", "suggestion_volume"]
-            cols_present = [c for c in cols_order if c in consolidated.columns]
-            consolidated = consolidated[cols_present]
-            st.dataframe(consolidated.reset_index(drop=True))
-            csv = consolidated.to_csv(index=False)
-            st.download_button("Download Options Snapshot CSV", data=csv, file_name="wheelos_options_snapshot.csv")
-        else:
-            st.info("No options data available for tickers. Use Safe Refresh or add tickers.")
-    else:
-        st.info("No tickers. Add one above.")
-
-    st.markdown("### Log New Trade")
-    with st.form("log_trade"):
-        ticker_list = [t["symbol"] for t in db_list_tickers()] or [""]
-        t_ticker = st.selectbox("Ticker", ticker_list)
-        t_type = st.selectbox("Type", ["CSP Put", "Covered Call"])
-        t_strike = st.number_input("Strike", value=0.0)
-        t_expiry = st.date_input("Expiry")
-        t_entry = st.number_input("Entry premium", value=0.0)
-        t_contracts = st.number_input("Contracts", value=1, min_value=1)
-        t_submit = st.form_submit_button("Log Trade")
-        if t_submit and t_ticker:
-            db_add_trade(t_ticker, t_type, t_strike, t_expiry.isoformat(), t_entry, int(t_contracts))
-            st.success("Trade logged.")
-
-    st.markdown("### Open Positions")
-    open_trades = db_list_trades(open_only=True)
-    if open_trades:
-        for tr in open_trades:
-            with st.expander(f"Trade #{tr['id']} — {tr['ticker']} — {tr['type']}"):
-                st.write(tr)
-                sym = tr["ticker"]
-                candles = st.session_state.market_data.get(sym, {}).get("candles")
-                if isinstance(candles, pd.DataFrame) and not candles.empty:
-                    st.line_chart(candles.set_index("date")["c"].tail(60))
-                else:
-                    st.write("Price history not available.")
-                hist = db_get_trade_history(tr["id"])
-                if hist:
-                    dfh = pd.DataFrame(hist)
-                    st.dataframe(dfh.head(10))
-                else:
-                    st.write("No trade history yet.")
-                price = st.session_state.market_data.get(sym, {}).get("quote", {}).get("c")
-                if price is not None:
-                    calc = compute_intrinsic_and_unrealized(tr, price)
-                    st.markdown("---")
-                    st.write(f"**Intrinsic:** ${calc['intrinsic']:.2f}")
-                    st.write(f"**Unrealized:** ${calc['unrealized']:.2f}")
-                    st.write(f"**Percent:** {percent_str(calc['percent'])}")
-                    st.write(f"**Status:** {status_text_for_percent(calc['percent'])}")
-                else:
-                    st.write("Live price unavailable.")
-
-# ---------------------------
-# LEAPs Tab
-# ---------------------------
-with tab_leaps:
-    st.header("LEAPs")
-    with st.form("add_leap"):
-        l_ticker = st.selectbox("Ticker", [t["symbol"] for t in db_list_tickers()] or [""])
-        l_cost = st.number_input("Cost basis", value=0.0)
-        l_current = st.number_input("Current value", value=0.0)
-        l_contracts = st.number_input("Contracts", value=1, min_value=1)
-        l_expiry = st.date_input("Expiry")
-        l_submit = st.form_submit_button("Add LEAP")
-        if l_submit and l_ticker:
-            db_add_leap(l_ticker, l_cost, l_current, int(l_contracts), l_expiry.isoformat())
-            st.success("LEAP added.")
-    leaps = db_list_leaps()
-    if leaps:
-        rows = []
-        for lp in leaps:
-            invested = lp["cost"] * lp["contracts"] * 100
-            current = lp["current_val"] * lp["contracts"] * 100
-            unreal = current - invested
-            pct = unreal / invested if invested != 0 else 0.0
-            rows.append({
-                "ticker": lp["ticker"],
-                "invested": invested,
-                "current": current,
-                "unrealized": unreal,
-                "percent": pct,
-                "expiry": lp["expiry"]
-            })
-        df = pd.DataFrame(rows)
-        st.dataframe(df)
-    else:
-        st.info("No LEAPs recorded.")
-
-# ---------------------------
-# Super Chart Tab
-# ---------------------------
-with tab_chart:
-    st.header("Super Chart")
-    tickers = [t["symbol"] for t in db_list_tickers()]
-    default = tickers[0] if tickers else "SPY"
-    sel = st.selectbox("Select ticker for Super Chart", tickers + [default])
-    st.markdown("#### TradingView Full Chart")
-    try:
-        st.components.v1.html(tradingview_widget(sel), height=700)
-    except Exception:
-        st.write("Unable to render TradingView widget in this environment.")
-    rv = st.session_state.market_data.get(sel, {}).get("rv")
-    if rv:
-        st.write(f"RV (annualized): {rv:.4f}")
-    econ = st.session_state.market_data.get("__ECON__", {}).get("calendar")
-    if econ:
-        st.markdown("#### Economic Calendar (sample)")
-        try:
-            events = econ.get("economicCalendar", []) if isinstance(econ, dict) else econ
-            if isinstance(events, list) and events:
-                df = pd.DataFrame(events).head(10)
-                st.dataframe(df)
-            else:
-                st.write("No economic events available.")
-        except Exception:
-            st.write("Economic calendar unavailable.")
-
-# ---------------------------
-# Journal Tab
-# ---------------------------
-with tab_journal:
-    st.header("Journal")
-    entries = db_list_journal()
-    if entries:
-        df = pd.DataFrame(entries)
-        st.dataframe(df)
-        csv = df.to_csv(index=False)
-        st.download_button("Download CSV", data=csv, file_name="wheelos_journal.csv")
-    else:
-        st.info("No journal entries yet.")
-    st.markdown("### Add Journal Entry")
-    with st.form("add_journal"):
-        j_date = st.date_input("Date", value=datetime.date.today())
-        j_ticker = st.selectbox("Ticker", [t["symbol"] for t in db_list_tickers()] + [""])
-        j_type = st.selectbox("Type", ["CSP Put", "Covered Call", "LEAP", "Other"])
-        j_action = st.text_input("Action")
-        j_profit = st.number_input("Profit", value=0.0)
-        j_note = st.text_area("Note")
-        j_submit = st.form_submit_button("Add Entry")
-        if j_submit:
-            db_add_journal(j_date.isoformat(), j_ticker, j_type, j_action, j_profit, j_note)
-            st.success("Journal entry added.")
-
-# ---------------------------
-# Settings Tab
-# ---------------------------
-with tab_settings:
-    st.header("Settings")
-    st.markdown("### Versioning")
-    cur_version = db_get_setting("app_version", DEFAULT_VERSION)
-    st.write(f"**Current version:** {cur_version}")
-    notes = get_version_notes_sorted()
-    if notes:
-        for ver, meta in notes:
-            ts = meta.get("timestamp", "")
-            note = meta.get("note", "")
-            st.write(f"- **{ver}** ({ts}): {note}")
-    else:
-        st.write("No version notes.")
-    st.markdown("---")
-    st.markdown("### App Settings")
-    st.write("Finnhub API Key stored:", bool(db_get_setting("finnhub_api_key")))
-    st.write("Wheel capital:", db_get_setting("wheel_capital"))
-    st.write("LEAP fund:", db_get_setting("leap_fund"))
-    st.markdown("---")
-    st.markdown("### Raw DB Preview (for debugging)")
-    if st.checkbox("Show raw tables"):
-        conn = get_conn()
-        for tbl in ["tickers", "ownership", "trades", "leaps", "journal", "trade_history", "settings"]:
-            try:
-                df = pd.read_sql_query(f"SELECT * FROM {tbl} LIMIT 200", conn)
-                st.write(f"Table: {tbl}")
-                st.dataframe(df)
-            except Exception as e:
-                st.write(f"Could not read {tbl}: {e}")
-        conn.close()
-
-# ---------------------------
-# Footer
-# ---------------------------
-st.markdown("---")
-cur_version = db_get_setting("app_version", DEFAULT_VERSION)
-notes = get_version_notes_sorted()
-latest_note = notes[0][1]["note"] if notes else ""
-st.write(f"**Version:** {cur_version} — {latest_note}")
-st.write("WheelOS — Personal tracking tool")
