@@ -335,11 +335,9 @@ def get_version_notes_sorted():
             note_text = v.get("note", "") if v.get("note", "") is not None else ""
             ts = v.get("timestamp", "") if v.get("timestamp", "") is not None else ""
         else:
-            # legacy string value
             note_text = str(v)
             ts = ""
         items.append((k, {"note": note_text, "timestamp": ts}))
-    # sort by timestamp desc (empty timestamps go last)
     items.sort(key=lambda x: x[1].get("timestamp") or "", reverse=True)
     return items
 
@@ -543,6 +541,20 @@ if "finnhub_client" not in st.session_state:
 
 st.set_page_config(page_title="WheelOS", layout="wide", initial_sidebar_state="expanded")
 
+# If we have an API key and tickers but no market data, attempt a gentle initial load (safe, wrapped)
+try:
+    if st.session_state.finnhub_client and not st.session_state.market_data:
+        tickers_exist = db_list_tickers()
+        if tickers_exist:
+            try:
+                safe_refresh_all(st.session_state.finnhub_client)
+                st.session_state.last_safe_refresh = now_iso()
+            except Exception:
+                # swallow errors on initial load to avoid breaking UI
+                pass
+except Exception:
+    pass
+
 # Sidebar - Settings and Controls
 with st.sidebar:
     st.markdown("## WheelOS Controls")
@@ -570,24 +582,25 @@ with st.sidebar:
     st.markdown("### Version Controls")
     cur_version = db_get_setting("app_version", DEFAULT_VERSION)
     st.write(f"**Current version:** {cur_version}")
+    # Increment and baseline use text_input + button pattern to avoid immediate rerun issues
+    inc_note = st.text_input("Increment note (one-line)", key="inc_note_input")
     if st.button("Increment Version"):
-        newv = increment_version(cur_version)
-        note = st.text_input("One-line summary for increment", key="inc_note")
-        if note:
+        if inc_note and inc_note.strip():
+            newv = increment_version(cur_version)
             db_set_setting("app_version", newv)
-            add_version_note(newv, note)
+            add_version_note(newv, inc_note.strip())
             st.success(f"Version incremented to {newv}")
         else:
-            st.info("Enter a one-line summary in the input above and click again.")
+            st.info("Enter a one-line summary in the Increment note field above.")
+    base_note = st.text_input("Baseline note (one-line)", key="base_note_input")
     if st.button("New Baseline Version"):
-        newv = new_baseline_version(cur_version)
-        note = st.text_input("One-line summary for baseline", key="base_note")
-        if note:
+        if base_note and base_note.strip():
+            newv = new_baseline_version(cur_version)
             db_set_setting("app_version", newv)
-            add_version_note(newv, note)
+            add_version_note(newv, base_note.strip())
             st.success(f"New baseline version {newv} created")
         else:
-            st.info("Enter a one-line summary in the input above and click again.")
+            st.info("Enter a one-line summary in the Baseline note field above.")
     st.markdown("---")
     st.markdown("### Quick Actions")
     if st.button("Add Example Tickers"):
@@ -603,7 +616,7 @@ tabs = st.tabs(tab_names)
 tab_dashboard, tab_wheel, tab_leaps, tab_chart, tab_journal, tab_settings = tabs
 
 # ---------------------------
-# Dashboard Tab (moved header/metrics here)
+# Dashboard Tab (header/metrics here)
 # ---------------------------
 with tab_dashboard:
     st.header("Dashboard")
@@ -663,25 +676,35 @@ with tab_dashboard:
                 else:
                     st.write("Price unavailable for live status.")
                 cols_act = st.columns(3)
+                # Close at 50% action
                 if cols_act[0].button("Close at 50%", key=f"close50_{tr['id']}"):
                     if price is not None:
                         calc = compute_intrinsic_and_unrealized(tr, price)
                         pnl = calc["unrealized"]
                         db_manual_close_trade(tr["id"], pnl)
                         db_add_journal(now_iso(), tr["ticker"], tr["type"], "closed_at_50", pnl, "Closed at 50% target")
-                        st.experimental_rerun()
+                        st.success("Trade closed at 50% target.")
                     else:
                         st.warning("Price unavailable to compute close.")
+                # Mark Assigned
                 if cols_act[1].button("Mark Assigned", key=f"assign_{tr['id']}"):
-                    assign_trade(tr["id"])
-                    st.success("Trade marked assigned and ownership flipped accordingly.")
-                    st.experimental_rerun()
-                if cols_act[2].button("Manual Close", key=f"manual_{tr['id']}"):
-                    pnl_in = st.number_input("Enter realized P/L", key=f"pnl_input_{tr['id']}")
-                    if st.button("Confirm Manual Close", key=f"confirm_manual_{tr['id']}"):
-                        db_manual_close_trade(tr["id"], pnl_in)
-                        db_add_journal(now_iso(), tr["ticker"], tr["type"], "manual_close", pnl_in, "Manual close by user")
-                        st.experimental_rerun()
+                    ok = assign_trade(tr["id"])
+                    if ok:
+                        st.success("Trade marked assigned and ownership flipped accordingly.")
+                    else:
+                        st.error("Failed to mark assigned.")
+                # Manual Close opens a small form
+                if cols_act[2].button("Manual Close", key=f"manual_btn_{tr['id']}"):
+                    st.session_state[f"manual_open_{tr['id']}"] = True
+                if st.session_state.get(f"manual_open_{tr['id']}", False):
+                    with st.form(f"manual_close_form_{tr['id']}"):
+                        pnl_in = st.number_input("Enter realized P/L", key=f"pnl_input_{tr['id']}")
+                        confirm = st.form_submit_button("Confirm Manual Close")
+                        if confirm:
+                            db_manual_close_trade(tr["id"], pnl_in)
+                            db_add_journal(now_iso(), tr["ticker"], tr["type"], "manual_close", pnl_in, "Manual close by user")
+                            st.success("Manual close recorded.")
+                            st.session_state[f"manual_open_{tr['id']}"] = False
 
     st.markdown("#### Recent Journal Entries")
     jrows = db_list_journal()
@@ -703,7 +726,6 @@ with tab_wheel:
         if submitted and new_ticker:
             db_add_ticker(new_ticker.strip().upper())
             st.success(f"Ticker {new_ticker.strip().upper()} added.")
-            st.experimental_rerun()
 
     st.markdown("### Ownership")
     tickers = db_list_tickers()
@@ -714,7 +736,9 @@ with tab_wheel:
             col1, col2 = st.columns([3,1])
             col1.write(f"**{sym}**")
             checked = col2.checkbox("Owns shares", value=owns, key=f"own_{sym}")
-            db_set_ownership(sym, bool(checked))
+            # update ownership only when changed
+            if checked != owns:
+                db_set_ownership(sym, bool(checked))
     else:
         st.info("No tickers. Add one above.")
 
@@ -731,7 +755,6 @@ with tab_wheel:
         if t_submit and t_ticker:
             db_add_trade(t_ticker, t_type, t_strike, t_expiry.isoformat(), t_entry, int(t_contracts))
             st.success("Trade logged.")
-            st.experimental_rerun()
 
     st.markdown("### Open Positions")
     open_trades = db_list_trades(open_only=True)
@@ -777,7 +800,6 @@ with tab_leaps:
         if l_submit and l_ticker:
             db_add_leap(l_ticker, l_cost, l_current, int(l_contracts), l_expiry.isoformat())
             st.success("LEAP added.")
-            st.experimental_rerun()
     leaps = db_list_leaps()
     if leaps:
         rows = []
@@ -853,7 +875,6 @@ with tab_journal:
         if j_submit:
             db_add_journal(j_date.isoformat(), j_ticker, j_type, j_action, j_profit, j_note)
             st.success("Journal entry added.")
-            st.experimental_rerun()
 
 # ---------------------------
 # Settings Tab
@@ -890,7 +911,7 @@ with tab_settings:
         conn.close()
 
 # ---------------------------
-# Footer (Dashboard shows header; footer remains global)
+# Footer
 # ---------------------------
 st.markdown("---")
 cur_version = db_get_setting("app_version", DEFAULT_VERSION)
