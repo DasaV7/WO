@@ -123,8 +123,7 @@ with st.sidebar:
         except NameError:
             # Functions not yet defined on first run; ignore
             pass
-        st.experimental_rerun()
-
+        st.rerun()
 
 # ============================
 # FINNHUB HELPERS (CACHED)
