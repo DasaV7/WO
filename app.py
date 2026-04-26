@@ -19,6 +19,8 @@ st.set_page_config(
     layout="wide",
 )
 
+APP_REVISION = "A.03.1"
+
 # Soft card styling (A.01-style)
 st.markdown(
     """
@@ -86,9 +88,49 @@ def _finnhub_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================
-# FINNHUB HELPERS
+# SIDEBAR
 # ============================
 
+with st.sidebar:
+    st.markdown("### Options Wheel")
+    st.markdown(f"**Revision:** `{APP_REVISION}`")
+
+    st.markdown("---")
+    st.markdown("**Current ticker**")
+    st.write(st.session_state.get("selected_ticker", "SPY"))
+
+    st.markdown("---")
+    st.markdown("**Data refresh**")
+
+    auto_refresh = st.checkbox("Auto-refresh quotes & chains", value=False, key="auto_refresh")
+    refresh_interval = st.slider(
+        "Auto-refresh interval (seconds)",
+        min_value=30,
+        max_value=600,
+        value=120,
+        step=30,
+        disabled=not auto_refresh,
+        key="refresh_interval",
+    )
+
+    if st.button("Safe refresh now"):
+        # Clear cached data only, not UI state
+        try:
+            get_quote.clear()
+            get_economic_calendar.clear()
+            get_market_snapshot.clear()
+            get_options_chain_ch2.clear()
+        except NameError:
+            # Functions not yet defined on first run; ignore
+            pass
+        st.experimental_rerun()
+
+
+# ============================
+# FINNHUB HELPERS (CACHED)
+# ============================
+
+@st.cache_data(ttl=60)
 def get_quote(symbol: str) -> Dict[str, Any]:
     """Current quote for a symbol."""
     try:
@@ -98,6 +140,7 @@ def get_quote(symbol: str) -> Dict[str, Any]:
     return data or {}
 
 
+@st.cache_data(ttl=300)
 def get_economic_calendar() -> pd.DataFrame:
     """Simple economic calendar for today ± 7 days."""
     today = dt.date.today()
@@ -116,6 +159,7 @@ def get_economic_calendar() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=60)
 def get_market_snapshot(symbols: List[str]) -> pd.DataFrame:
     """Build a simple snapshot table for a list of tickers."""
     rows = []
@@ -143,6 +187,7 @@ def get_market_snapshot(symbols: List[str]) -> pd.DataFrame:
 # OPTIONS CHAIN (CH2) HELPERS
 # ============================
 
+@st.cache_data(ttl=60)
 def get_options_chain_ch2(symbol: str) -> Dict[str, Any]:
     """
     Fetch options chain using Finnhub's grouped-by-expiry style (CH2).
@@ -183,7 +228,6 @@ def normalize_chain_ch2_to_frames(chain: Dict[str, Any]) -> Dict[str, pd.DataFra
                 rows.append(row)
         if rows:
             df = pd.DataFrame(rows)
-            # Standardize some common columns if present
             rename_map = {
                 "strikePrice": "strike",
                 "Strike": "strike",
@@ -210,6 +254,8 @@ if "tracked_tickers" not in st.session_state:
 
 def set_selected_ticker(sym: str) -> None:
     st.session_state.selected_ticker = sym
+
+
 # ============================
 # MAIN LAYOUT & TABS
 # ============================
@@ -386,6 +432,8 @@ with tabs[1]:
         st.info("Open positions table placeholder.")
 
         st.markdown('</div>', unsafe_allow_html=True)
+
+
 # ============================
 # LEAPs TAB
 # ============================
@@ -497,9 +545,9 @@ with tabs[4]:
 # ============================
 
 st.markdown(
-    """
+    f"""
     <div style='text-align:center; margin-top:2rem; color:#94a3b8; font-size:0.8rem;'>
-        A.03 Build — Dashboard Restored • TradingView Chart • CH2 Options Chain • A.01 Enhancements Preserved
+        A.03 Build (rev {APP_REVISION}) — Dashboard Restored • TradingView Chart • CH2 Options Chain • A.01 Enhancements Preserved
     </div>
     """,
     unsafe_allow_html=True,
