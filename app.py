@@ -1085,3 +1085,302 @@ with tab_dashboard:
                 if cols_act[0].button("Close at 50%", key=f"close50_{tr['id']}"):
                     if price is not None:
                         calc = compute_intrinsic_and_unrealized(tr, price)
+                        pnl = calc["unrealized"]
+                        db_manual_close_trade(tr["id"], pnl)
+                        db_add_journal(now_iso(), tr["ticker"], tr["type"], "closed_at_50", pnl, "Closed at 50% target")
+                        st.success("Trade closed at 50% target.")
+                if cols_act[1].button("Mark Assigned", key=f"assign_{tr['id']}"):
+                    ok = assign_trade(tr["id"])
+                    if ok:
+                        st.success("Trade marked assigned and ownership flipped accordingly.")
+                    else:
+                        st.error("Failed to mark assigned.")
+                if cols_act[2].button("Manual Close", key=f"manual_btn_{tr['id']}"):
+                    st.session_state[f"manual_open_{tr['id']}"] = True
+                if st.session_state.get(f"manual_open_{tr['id']}", False):
+                    with st.form(f"manual_close_form_{tr['id']}"):
+                        pnl_in = st.number_input("Enter realized P/L", key=f"pnl_input_{tr['id']}")
+                        confirm = st.form_submit_button("Confirm Manual Close")
+                        if confirm:
+                            db_manual_close_trade(tr["id"], pnl_in)
+                            db_add_journal(now_iso(), tr["ticker"], tr["type"], "manual_close", pnl_in, "Manual close by user")
+                            st.success("Manual close recorded.")
+                            st.session_state[f"manual_open_{tr['id']}"] = False
+
+    st.markdown("#### Recent Journal Entries")
+    jrows = db_list_journal()
+    if jrows:
+        dfj = pd.DataFrame(jrows)
+        st.dataframe(dfj.head(20))
+    else:
+        st.info("No journal entries yet.")
+
+# ---------------------------
+# Wheel / CSP Tab (consolidated options table)
+# ---------------------------
+with tab_wheel:
+    st.header("Wheel / CSP")
+    st.markdown("### Add Ticker")
+    with st.form("add_ticker_form"):
+        new_ticker = st.text_input("Ticker symbol")
+        submitted = st.form_submit_button("Add Ticker")
+        if submitted and new_ticker:
+            db_add_ticker(new_ticker.strip().upper())
+            st.success(f"Ticker {new_ticker.strip().upper()} added.")
+
+    st.markdown("### Ownership")
+    tickers = db_list_tickers()
+    if tickers:
+        client = st.session_state.finnhub_client
+        missing = [t["symbol"] for t in tickers if t["symbol"] not in st.session_state.market_data]
+        if missing:
+            try:
+                safe_refresh_all(client)
+            except Exception:
+                pass
+
+        # Ownership toggles
+        for t in tickers:
+            sym = t["symbol"]
+            owns = db_get_ownership(sym)
+            col1, col2 = st.columns([3,1])
+            col1.write(f"**{sym}**")
+            checked = col2.checkbox("Owns shares", value=owns, key=f"own_{sym}")
+            if checked != owns:
+                db_set_ownership(sym, bool(checked))
+
+        st.markdown("### Options Snapshot (consolidated)")
+        rows = []
+        for t in tickers:
+            sym = t["symbol"]
+            try:
+                df_row = build_options_table_for_ticker(sym, client)
+                if not df_row.empty:
+                    rows.append(df_row.iloc[0].to_dict())
+            except Exception:
+                continue
+        if rows:
+            consolidated = pd.DataFrame(rows)
+            num_cols = ["current_price", "prev_close", "atm_strike", "atm_bid", "atm_ask", "atm_spread", "atm_volume",
+                        "suggestion_strike", "suggestion_bid", "suggestion_ask", "suggestion_spread", "suggestion_volume"]
+            for col in num_cols:
+                if col in consolidated.columns:
+                    consolidated[col] = consolidated[col].apply(lambda x: round(x, 2) if isinstance(x, (int, float)) else x)
+            def dte_from_iso(iso):
+                try:
+                    if not iso:
+                        return None
+                    d = parse_date(iso)
+                    if not d:
+                        return None
+                    return (d - datetime.date.today()).days
+                except Exception:
+                    return None
+            consolidated["atm_dte"] = consolidated["atm_expiry"].apply(lambda x: dte_from_iso(x) if x is not None else None)
+            consolidated["suggestion_dte"] = consolidated["suggestion_expiry"].apply(lambda x: dte_from_iso(x) if x is not None else None)
+            cols_order = ["ticker", "current_price", "prev_close", "day_color",
+                          "atm_expiry", "atm_dte", "atm_strike", "atm_bid", "atm_ask", "atm_spread", "atm_volume",
+                          "suggestion_action", "suggestion_expiry", "suggestion_dte", "suggestion_strike", "suggestion_bid", "suggestion_ask", "suggestion_spread", "suggestion_volume",
+                          "options_count", "expiries_count"]
+            cols_present = [c for c in cols_order if c in consolidated.columns]
+            consolidated = consolidated[cols_present]
+            st.dataframe(consolidated.reset_index(drop=True))
+            csv = consolidated.to_csv(index=False)
+            st.download_button("Download Options Snapshot CSV", data=csv, file_name="wheelos_options_snapshot.csv")
+        else:
+            st.info("No options data available for tickers. Use Safe Refresh or add tickers.")
+    else:
+        st.info("No tickers. Add one above.")
+
+    st.markdown("### Log New Trade")
+    with st.form("log_trade"):
+        ticker_list = [t["symbol"] for t in db_list_tickers()] or [""]
+        t_ticker = st.selectbox("Ticker", ticker_list)
+        t_type = st.selectbox("Type", ["CSP Put", "Covered Call"])
+        t_strike = st.number_input("Strike", value=0.0)
+        t_expiry = st.date_input("Expiry")
+        t_entry = st.number_input("Entry premium", value=0.0)
+        t_contracts = st.number_input("Contracts", value=1, min_value=1)
+        t_submit = st.form_submit_button("Log Trade")
+        if t_submit and t_ticker:
+            db_add_trade(t_ticker, t_type, t_strike, t_expiry.isoformat(), t_entry, int(t_contracts))
+            st.success("Trade logged.")
+
+    st.markdown("### Open Positions")
+    open_trades = db_list_trades(open_only=True)
+    if open_trades:
+        for tr in open_trades:
+            with st.expander(f"Trade #{tr['id']} — {tr['ticker']} — {tr['type']}"):
+                st.write(tr)
+                sym = tr["ticker"]
+                candles = st.session_state.market_data.get(sym, {}).get("candles")
+                if isinstance(candles, pd.DataFrame) and not candles.empty:
+                    st.line_chart(candles.set_index("date")["c"].tail(60))
+                else:
+                    st.write("Price history not available.")
+                hist = db_get_trade_history(tr["id"])
+                if hist:
+                    dfh = pd.DataFrame(hist)
+                    st.dataframe(dfh.head(10))
+                else:
+                    st.write("No trade history yet.")
+                price = st.session_state.market_data.get(sym, {}).get("quote", {}).get("c")
+                if price is not None:
+                    calc = compute_intrinsic_and_unrealized(tr, price)
+                    st.markdown("---")
+                    st.write(f"**Intrinsic:** ${calc['intrinsic']:.2f}")
+                    st.write(f"**Unrealized:** ${calc['unrealized']:.2f}")
+                    st.write(f"**Percent:** {percent_str(calc['percent'])}")
+                    st.write(f"**Status:** {status_text_for_percent(calc['percent'])}")
+                else:
+                    st.write("Live price unavailable.")
+
+# ---------------------------
+# LEAPs Tab
+# ---------------------------
+with tab_leaps:
+    st.header("LEAPs")
+    with st.form("add_leap"):
+        l_ticker = st.selectbox("Ticker", [t["symbol"] for t in db_list_tickers()] or [""])
+        l_cost = st.number_input("Cost basis", value=0.0)
+        l_current = st.number_input("Current value", value=0.0)
+        l_contracts = st.number_input("Contracts", value=1, min_value=1)
+        l_expiry = st.date_input("Expiry")
+        l_submit = st.form_submit_button("Add LEAP")
+        if l_submit and l_ticker:
+            db_add_leap(l_ticker, l_cost, l_current, int(l_contracts), l_expiry.isoformat())
+            st.success("LEAP added.")
+    leaps = db_list_leaps()
+    if leaps:
+        rows = []
+        for lp in leaps:
+            invested = lp["cost"] * lp["contracts"] * 100
+            current = lp["current_val"] * lp["contracts"] * 100
+            unreal = current - invested
+            pct = unreal / invested if invested != 0 else 0.0
+            rows.append({
+                "ticker": lp["ticker"],
+                "invested": invested,
+                "current": current,
+                "unrealized": unreal,
+                "percent": pct,
+                "expiry": lp["expiry"]
+            })
+        df = pd.DataFrame(rows)
+        st.dataframe(df)
+    else:
+        st.info("No LEAPs recorded.")
+
+# ---------------------------
+# Super Chart Tab
+# ---------------------------
+with tab_chart:
+    st.header("Super Chart")
+    tickers = [t["symbol"] for t in db_list_tickers()]
+    default = tickers[0] if tickers else "SPY"
+    sel = st.selectbox("Select ticker for Super Chart", tickers + [default])
+    st.markdown("#### TradingView Full Chart")
+    try:
+        st.components.v1.html(tradingview_widget(sel), height=700)
+    except Exception:
+        st.write("Unable to render TradingView widget in this environment.")
+    rv = st.session_state.market_data.get(sel, {}).get("rv")
+    if rv:
+        st.write(f"RV (annualized): {rv:.4f}")
+    econ = st.session_state.market_data.get("__ECON__", {}).get("calendar")
+    if econ:
+        st.markdown("#### Economic Calendar (sample)")
+        try:
+            events = econ.get("economicCalendar", []) if isinstance(econ, dict) else econ
+            if isinstance(events, list) and events:
+                df = pd.DataFrame(events).head(10)
+                st.dataframe(df)
+            else:
+                st.write("No economic events available.")
+        except Exception:
+            st.write("Economic calendar unavailable.")
+
+# ---------------------------
+# Journal Tab
+# ---------------------------
+with tab_journal:
+    st.header("Journal")
+    entries = db_list_journal()
+    if entries:
+        df = pd.DataFrame(entries)
+        st.dataframe(df)
+        csv = df.to_csv(index=False)
+        st.download_button("Download CSV", data=csv, file_name="wheelos_journal.csv")
+    else:
+        st.info("No journal entries yet.")
+    st.markdown("### Add Journal Entry")
+    with st.form("add_journal"):
+        j_date = st.date_input("Date", value=datetime.date.today())
+        j_ticker = st.selectbox("Ticker", [t["symbol"] for t in db_list_tickers()] + [""])
+        j_type = st.selectbox("Type", ["CSP Put", "Covered Call", "LEAP", "Other"])
+        j_action = st.text_input("Action")
+        j_profit = st.number_input("Profit", value=0.0)
+        j_note = st.text_area("Note")
+        j_submit = st.form_submit_button("Add Entry")
+        if j_submit:
+            db_add_journal(j_date.isoformat(), j_ticker, j_type, j_action, j_profit, j_note)
+            st.success("Journal entry added.")
+
+# ---------------------------
+# Settings Tab (with debug log)
+# ---------------------------
+with tab_settings:
+    st.header("Settings")
+    st.markdown("### Versioning")
+    cur_version = db_get_setting("app_version", DEFAULT_VERSION)
+    st.write(f"**Current version:** {cur_version}")
+    notes = get_version_notes_sorted()
+    if notes:
+        for ver, meta in notes:
+            ts = meta.get("timestamp", "")
+            note = meta.get("note", "")
+            st.write(f"- **{ver}** ({ts}): {note}")
+    else:
+        st.write("No version notes.")
+    st.markdown("---")
+    st.markdown("### App Settings")
+    st.write("Finnhub API Key stored:", bool(db_get_setting("finnhub_api_key")))
+    st.write("Wheel capital:", db_get_setting("wheel_capital"))
+    st.write("LEAP fund:", db_get_setting("leap_fund"))
+    st.markdown("---")
+    st.markdown("### Options Debug Log")
+    if st.session_state.get("debug_mode"):
+        dbg = st.session_state.get("options_debug", {})
+        if dbg:
+            dbg_rows = []
+            for k, v in dbg.items():
+                row = {"ticker": k, "source": v.get("source"), "options_count": v.get("options_count"), "expiries_count": v.get("expiries_count"), "last_refresh": v.get("last_refresh")}
+                dbg_rows.append(row)
+            df_dbg = pd.DataFrame(dbg_rows)
+            st.dataframe(df_dbg)
+        else:
+            st.info("No debug data yet. Run Safe Refresh.")
+    else:
+        st.write("Debug mode is off. Enable 'Show options debug in Settings' in the sidebar to view raw payload diagnostics.")
+    st.markdown("---")
+    st.markdown("### Raw DB Preview (for debugging)")
+    if st.checkbox("Show raw tables"):
+        conn = get_conn()
+        for tbl in ["tickers", "ownership", "trades", "leaps", "journal", "trade_history", "settings"]:
+            try:
+                df = pd.read_sql_query(f"SELECT * FROM {tbl} LIMIT 200", conn)
+                st.write(f"Table: {tbl}")
+                st.dataframe(df)
+            except Exception as e:
+                st.write(f"Could not read {tbl}: {e}")
+        conn.close()
+
+# ---------------------------
+# Footer
+# ---------------------------
+st.markdown("---")
+cur_version = db_get_setting("app_version", DEFAULT_VERSION)
+notes = get_version_notes_sorted()
+latest_note = notes[0][1]["note"] if notes else ""
+st.write(f"**Version:** {cur_version} — {latest_note}")
+st.write("WheelOS — Personal tracking tool")
