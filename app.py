@@ -14,7 +14,7 @@ import html
 # Constants and Config
 # ---------------------------
 DB_PATH = "wheelos.db"
-DEFAULT_VERSION = "A.03"
+DEFAULT_VERSION = "A.04"
 CALLS_PER_MIN_LIMIT = 50
 TRADE_HISTORY_MAX = 300
 YAHOO_OPTIONS_BASE = "https://query1.finance.yahoo.com/v7/finance/options"
@@ -35,7 +35,6 @@ def parse_date(s):
             return s
         if isinstance(s, datetime.datetime):
             return s.date()
-        # try ISO
         try:
             return datetime.datetime.fromisoformat(str(s)).date()
         except Exception:
@@ -470,7 +469,6 @@ def parse_options_from_yahoo(yahoo_raw: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not option_chain:
             return opts
         oc = option_chain[0]
-        underlying = oc.get("quote", {})
         for exp in oc.get("options", []):
             expiry_ts = exp.get("expirationDate")
             calls = exp.get("calls", []) or []
@@ -596,7 +594,6 @@ def safe_refresh_all(client: Optional[FinnhubClient]):
                     options = client.fetch_options_chain(sym) or {}
                 except Exception:
                     options = {}
-            # fallback: if no options from finnhub, try Yahoo
             if not options:
                 yahoo_raw = fetch_options_yahoo(sym)
                 options = yahoo_raw or {}
@@ -735,9 +732,7 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
 
     options_list = []
     if md and md.get("options"):
-        # try parse finnhub or yahoo raw
         raw = md.get("options")
-        # if raw looks like yahoo structure
         if isinstance(raw, dict) and raw.get("optionChain"):
             options_list = parse_options_from_yahoo(raw)
         else:
@@ -749,7 +744,6 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
         except Exception:
             options_list = []
     if not options_list:
-        # fallback to Yahoo
         yahoo_raw = fetch_options_yahoo(sym)
         options_list = parse_options_from_yahoo(yahoo_raw)
 
@@ -1041,7 +1035,7 @@ with tab_dashboard:
         st.info("No journal entries yet.")
 
 # ---------------------------
-# Wheel / CSP Tab (with options table for each ticker)
+# Wheel / CSP Tab (consolidated options table)
 # ---------------------------
 with tab_wheel:
     st.header("Wheel / CSP")
@@ -1053,17 +1047,18 @@ with tab_wheel:
             db_add_ticker(new_ticker.strip().upper())
             st.success(f"Ticker {new_ticker.strip().upper()} added.")
 
-    st.markdown("### Ownership and Options Snapshot")
+    st.markdown("### Ownership")
     tickers = db_list_tickers()
     if tickers:
         client = st.session_state.finnhub_client
-        # Ensure market data exists for all tickers (gentle load if missing)
         missing = [t["symbol"] for t in tickers if t["symbol"] not in st.session_state.market_data]
-        if missing and (client or True):
+        if missing:
             try:
                 safe_refresh_all(client)
             except Exception:
                 pass
+
+        # Ownership toggles
         for t in tickers:
             sym = t["symbol"]
             owns = db_get_ownership(sym)
@@ -1073,22 +1068,48 @@ with tab_wheel:
             if checked != owns:
                 db_set_ownership(sym, bool(checked))
 
-            st.markdown(f"**Options snapshot for {sym}**")
+        st.markdown("### Options Snapshot (consolidated)")
+        rows = []
+        for t in tickers:
+            sym = t["symbol"]
             try:
-                opt_df = build_options_table_for_ticker(sym, client)
-                if not opt_df.empty:
-                    display_df = opt_df.copy()
-                    # format numeric columns
-                    for col in ["current_price", "prev_close", "atm_strike", "atm_bid", "atm_ask", "atm_spread", "atm_volume", "suggestion_strike", "suggestion_bid", "suggestion_ask", "suggestion_spread", "suggestion_volume"]:
-                        if col in display_df.columns:
-                            display_df[col] = display_df[col].apply(lambda x: round(x, 2) if isinstance(x, (int, float)) else x)
-                    # transpose for compact view
-                    st.table(display_df.T.rename(columns={0: sym}))
-                else:
-                    st.write("No options data available for this ticker.")
-            except Exception as e:
-                st.write("Error building options snapshot:", e)
-
+                df_row = build_options_table_for_ticker(sym, client)
+                if not df_row.empty:
+                    rows.append(df_row.iloc[0].to_dict())
+            except Exception:
+                continue
+        if rows:
+            consolidated = pd.DataFrame(rows)
+            # Format numeric columns
+            num_cols = ["current_price", "prev_close", "atm_strike", "atm_bid", "atm_ask", "atm_spread", "atm_volume",
+                        "suggestion_strike", "suggestion_bid", "suggestion_ask", "suggestion_spread", "suggestion_volume"]
+            for col in num_cols:
+                if col in consolidated.columns:
+                    consolidated[col] = consolidated[col].apply(lambda x: round(x, 2) if isinstance(x, (int, float)) else x)
+            # Add a human-friendly DTE for suggestion_expiry and atm_expiry
+            def dte_from_iso(iso):
+                try:
+                    if not iso:
+                        return None
+                    d = parse_date(iso)
+                    if not d:
+                        return None
+                    return (d - datetime.date.today()).days
+                except Exception:
+                    return None
+            consolidated["atm_dte"] = consolidated["atm_expiry"].apply(lambda x: dte_from_iso(x) if x is not None else None)
+            consolidated["suggestion_dte"] = consolidated["suggestion_expiry"].apply(lambda x: dte_from_iso(x) if x is not None else None)
+            # Reorder columns for readability
+            cols_order = ["ticker", "current_price", "prev_close", "day_color",
+                          "atm_expiry", "atm_dte", "atm_strike", "atm_bid", "atm_ask", "atm_spread", "atm_volume",
+                          "suggestion_type", "suggestion_expiry", "suggestion_dte", "suggestion_strike", "suggestion_bid", "suggestion_ask", "suggestion_spread", "suggestion_volume"]
+            cols_present = [c for c in cols_order if c in consolidated.columns]
+            consolidated = consolidated[cols_present]
+            st.dataframe(consolidated.reset_index(drop=True))
+            csv = consolidated.to_csv(index=False)
+            st.download_button("Download Options Snapshot CSV", data=csv, file_name="wheelos_options_snapshot.csv")
+        else:
+            st.info("No options data available for tickers. Use Safe Refresh or add tickers.")
     else:
         st.info("No tickers. Add one above.")
 
