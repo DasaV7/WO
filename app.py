@@ -939,6 +939,74 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
 
     return pd.DataFrame([row])
 
+def force_fetch_and_show_options(sym: str, client: Optional[FinnhubClient]):
+    st.markdown("---")
+    st.markdown(f"### Force fetch options for {sym}")
+    raw = None
+    source = "none"
+    # 1) explicit Finnhub API call
+    if client:
+        try:
+            raw_candidate = client.fetch_options_chain(sym) or {}
+            if raw_candidate:
+                raw = raw_candidate
+                source = "finnhub_api"
+        except Exception as e:
+            st.write("Finnhub API call error:", str(e))
+    # 2) session fallback
+    if raw is None:
+        md = st.session_state.market_data.get(sym, {}) if "market_data" in st.session_state else {}
+        if md and md.get("options"):
+            raw = md.get("options")
+            source = "session_market_data"
+    # 3) yahoo fallback
+    if raw is None:
+        try:
+            yahoo_raw = fetch_options_yahoo(sym) or {}
+            if yahoo_raw:
+                raw = yahoo_raw
+                source = "yahoo_api"
+        except Exception:
+            raw = None
+    raw_size = 0
+    try:
+        raw_size = len(json.dumps(raw)) if raw else 0
+    except Exception:
+        raw_size = 0
+    st.write("Source used:", source)
+    st.write("Raw payload size (bytes):", raw_size)
+    with st.expander("Show raw payload JSON"):
+        if raw:
+            try:
+                st.code(json.dumps(raw, indent=2, default=str), language="json")
+            except Exception:
+                st.write(raw)
+        else:
+            st.write("No raw payload available.")
+    # parse and show parsed rows
+    parsed = []
+    if raw:
+        parsed = parse_options_from_finnhub(raw) or []
+        if not parsed:
+            parsed = parse_options_from_yahoo(raw) or []
+    if not parsed:
+        yahoo_raw2 = fetch_options_yahoo(sym)
+        parsed = parse_options_from_yahoo(yahoo_raw2) or []
+    st.write("Parsed option rows:", len(parsed))
+    if parsed:
+        for o in parsed:
+            try:
+                o["expiry_date"] = parse_date(o.get("expiry"))
+            except Exception:
+                o["expiry_date"] = None
+        df = pd.DataFrame(parsed)
+        cols = [c for c in ["symbol","type","strike","expiry","bid","ask","volume","openInterest","impliedVol"] if c in df.columns]
+        st.dataframe(df[cols].head(200))
+        expiries = sorted({o["expiry_date"] for o in parsed if o.get("expiry_date")})
+        st.write("Unique expiries found:", len(expiries))
+    else:
+        st.info("No parsed option rows found.")
+
 def show_raw_options_debug_for_first_ticker_v2(client: Optional[FinnhubClient]):
     """
     Improved raw options debug for the first ticker:
@@ -1669,8 +1737,11 @@ with tab_wheel:
     # Example placement inside the existing `with tab_wheel:` block, after the Open Positions section:
     #client = st.session_state.finnhub_client
     #show_raw_options_debug_for_first_ticker(client)
+    #client = st.session_state.get("finnhub_client")
+    #show_raw_options_debug_for_first_ticker_v2(client)
     client = st.session_state.get("finnhub_client")
-    show_raw_options_debug_for_first_ticker_v2(client)
+    force_fetch_and_show_options("AAPL", client)   # replace "AAPL" with the ticker you want to inspect
+
 
 # ---------------------------
 # LEAPs Tab
