@@ -939,6 +939,223 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
 
     return pd.DataFrame([row])
 
+def show_raw_options_debug_for_first_ticker_v2(client: Optional[FinnhubClient]):
+    """
+    Improved raw options debug for the first ticker:
+    - Explicitly calls Finnhub API first (if client provided) to fetch options_chain
+    - Falls back to session data, then Yahoo
+    - Displays raw payload size, parsed rows, and a matched suggestion for computed 10% OTM / 30DTE
+    - Writes debug info into st.session_state.options_debug
+    Place this at the bottom of the Wheel / CSP tab (after Open Positions).
+    """
+    tickers = db_list_tickers()
+    if not tickers:
+        st.info("No tickers to debug. Add a ticker first.")
+        return
+
+    first_sym = tickers[0]["symbol"]
+    st.markdown("---")
+    st.markdown(f"### Raw Options Debug for {first_sym}")
+
+    # Try Finnhub API first (explicit)
+    raw = None
+    source = None
+    raw_size = 0
+    parsed = []
+
+    # 1) Try explicit Finnhub API call if client available
+    if client:
+        try:
+            raw_candidate = client.fetch_options_chain(first_sym) or {}
+            if raw_candidate:
+                raw = raw_candidate
+                source = "finnhub_api"
+        except Exception as e:
+            # record but continue to other fallbacks
+            st.write(f"Finnhub API call error: {e}")
+
+    # 2) If no raw from API, try session market_data
+    if raw is None:
+        md = st.session_state.market_data.get(first_sym, {}) if "market_data" in st.session_state else {}
+        if md and md.get("options"):
+            raw = md.get("options")
+            source = "session_market_data"
+
+    # 3) If still none, try Yahoo fallback
+    if raw is None:
+        try:
+            yahoo_raw = fetch_options_yahoo(first_sym) or {}
+            if yahoo_raw:
+                raw = yahoo_raw
+                source = "yahoo_api"
+        except Exception:
+            raw = None
+
+    # Compute raw size
+    try:
+        raw_size = len(json.dumps(raw)) if raw else 0
+    except Exception:
+        raw_size = 0
+
+    st.write(f"**Source used:** {source or 'none'}")
+    st.write(f"**Raw payload size (bytes):** {raw_size}")
+
+    # Show raw JSON in an expander
+    with st.expander("Show raw options payload (JSON)"):
+        if raw:
+            try:
+                pretty = json.dumps(raw, indent=2, default=str)
+                st.code(pretty, language="json")
+            except Exception:
+                st.write(raw)
+        else:
+            st.write("No raw options payload available for this ticker from any source.")
+
+    # Parse options using both parsers (finnhub parser preferred)
+    if raw:
+        parsed = parse_options_from_finnhub(raw) or []
+        if not parsed:
+            parsed = parse_options_from_yahoo(raw) or []
+
+    # If still empty, try explicit Yahoo fetch and parse
+    if not parsed:
+        try:
+            yahoo_raw2 = fetch_options_yahoo(first_sym) or {}
+            parsed = parse_options_from_yahoo(yahoo_raw2) or []
+            if parsed and not source:
+                source = "yahoo_api_explicit"
+        except Exception:
+            parsed = []
+
+    st.write(f"**Parsed option rows:** {len(parsed)}")
+
+    if not parsed:
+        st.info("Parsed options list is empty for this ticker. Check Options Debug Log in Settings and run Safe Refresh.")
+        # record debug info
+        if "options_debug" not in st.session_state:
+            st.session_state.options_debug = {}
+        st.session_state.options_debug[first_sym] = {
+            "source": source or "none",
+            "raw_size": raw_size,
+            "options_count": 0,
+            "expiries_count": 0,
+            "last_refresh": now_iso()
+        }
+        return
+
+    # Normalize expiry_date and show sample parsed rows
+    for o in parsed:
+        try:
+            o["expiry_date"] = parse_date(o.get("expiry"))
+        except Exception:
+            o["expiry_date"] = None
+
+    df_parsed = pd.DataFrame(parsed)
+    cols_show = [c for c in ["symbol", "type", "strike", "expiry", "bid", "ask", "volume", "openInterest", "impliedVol"] if c in df_parsed.columns]
+    st.dataframe(df_parsed[cols_show].head(200))
+
+    # Underlying quote
+    md = st.session_state.market_data.get(first_sym, {}) if "market_data" in st.session_state else {}
+    quote = md.get("quote") if md else {}
+    if not quote and client:
+        try:
+            quote = client.fetch_quote(first_sym) or {}
+        except Exception:
+            quote = {}
+    price = quote.get("c") or quote.get("current") or quote.get("last")
+    prev_close = quote.get("pc") or quote.get("previousClose")
+    st.write(f"**Underlying price:** {price if price is not None else '—'}")
+    st.write(f"**Previous close:** {prev_close if prev_close is not None else '—'}")
+
+    # Day change and red/green decision (±3% threshold)
+    day_change = None
+    if price is not None and prev_close:
+        try:
+            day_change = (price - prev_close) / prev_close
+            st.write(f"**Day change:** {day_change*100:.2f}%")
+        except Exception:
+            day_change = None
+
+    if day_change is not None:
+        if day_change <= -0.03:
+            side = "put"
+        elif day_change >= 0.03:
+            side = "call"
+        else:
+            side = "put" if price is not None and prev_close is not None and price < prev_close else "call"
+    else:
+        side = "put" if price is not None and prev_close is not None and price < prev_close else "call"
+
+    st.write(f"**Suggested action (based on day change):** Sell {side.capitalize()}")
+
+    # Compute target 10% OTM strike and find ~30D expiry
+    today = datetime.date.today()
+    target_days = 30
+    target_strike = None
+    if price is not None:
+        target_strike = round(price * (0.9 if side == "put" else 1.1), 2)
+    expiries = sorted({o["expiry_date"] for o in parsed if o.get("expiry_date")})
+    expiry_30 = None
+    if expiries:
+        expiry_30 = min(expiries, key=lambda d: abs((d - today).days - target_days))
+
+    st.write(f"**Computed 10% OTM strike:** {target_strike if target_strike is not None else '—'}")
+    st.write(f"**Computed target expiry (approx 30D):** {expiry_30.isoformat() if expiry_30 else '—'}")
+
+    # Try to match to an actual option row (prefer expiry_30)
+    suggestion = None
+    if expiry_30:
+        candidates = [o for o in parsed if o.get("expiry_date") == expiry_30 and o.get("type") == side]
+        if candidates and target_strike is not None:
+            suggestion = nearest(candidates, "strike", target_strike)
+
+    if suggestion is None and parsed and target_strike is not None:
+        best = None
+        best_score = None
+        for o in parsed:
+            if not o.get("expiry_date"):
+                continue
+            dte = (o["expiry_date"] - today).days
+            if dte < 0:
+                continue
+            if o.get("type") != side:
+                continue
+            strike_diff = abs(o.get("strike", 0) - target_strike)
+            score = abs(dte - target_days) + strike_diff / max(1.0, price or 1.0)
+            if best_score is None or score < best_score:
+                best_score = score
+                best = o
+        suggestion = best
+
+    if suggestion:
+        st.markdown("**Matched option row (closest to computed 10% OTM & 30DTE):**")
+        s = suggestion
+        st.write({
+            "contractSymbol": s.get("symbol"),
+            "type": s.get("type"),
+            "strike": s.get("strike"),
+            "expiry": s.get("expiry"),
+            "bid": s.get("bid"),
+            "ask": s.get("ask"),
+            "spread": (None if s.get("bid") is None or s.get("ask") is None else round(s.get("ask") - s.get("bid"), 4)),
+            "volume": s.get("volume"),
+            "openInterest": s.get("openInterest"),
+            "iv": s.get("impliedVol") or s.get("iv") or None
+        })
+    else:
+        st.info("No matching option row found for the computed 10% OTM / 30DTE. The consolidated snapshot will still show the computed strike; market fields will be empty until provider returns option rows.")
+
+    # Record debug info in session for Settings tab
+    if "options_debug" not in st.session_state:
+        st.session_state.options_debug = {}
+    st.session_state.options_debug[first_sym] = {
+        "source": source or "none",
+        "raw_size": raw_size,
+        "options_count": len(parsed),
+        "expiries_count": len(expiries),
+        "last_refresh": now_iso()
+    }
+
 # Insert this function into your app (A.06) and call it at the bottom of the Wheel / CSP tab.
 def show_raw_options_debug_for_first_ticker(client: Optional[FinnhubClient]):
     """
@@ -1450,8 +1667,10 @@ with tab_wheel:
                     st.write("Live price unavailable.")
     # How to call it: add this call at the bottom of the Wheel / CSP tab (after Open Positions)
     # Example placement inside the existing `with tab_wheel:` block, after the Open Positions section:
-    client = st.session_state.finnhub_client
-    show_raw_options_debug_for_first_ticker(client)
+    #client = st.session_state.finnhub_client
+    #show_raw_options_debug_for_first_ticker(client)
+    client = st.session_state.get("finnhub_client")
+    show_raw_options_debug_for_first_ticker_v2(client)
 
 # ---------------------------
 # LEAPs Tab
