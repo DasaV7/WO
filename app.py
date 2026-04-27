@@ -1,4 +1,14 @@
-# app.py
+# WheelOS app.py
+# Version: A.06
+# Created: 2026-04-26T20:40:00 PDT
+# Single-file Streamlit application for personal options tracking (WheelOS)
+# - Consolidated options snapshot
+# - Finnhub + Yahoo options fallback
+# - Safe refresh, RV, trade history, journal, versioning
+# - Options debug logging
+# - House money simulation feature (A.06)
+# ------------------------------------------------------------------------------
+
 import streamlit as st
 import sqlite3
 import requests
@@ -128,12 +138,24 @@ def init_db():
         value TEXT
     )""")
     conn.commit()
+    # Ensure versioning keys exist
     cur.execute("SELECT value FROM settings WHERE key='app_version'")
     if cur.fetchone() is None:
         cur.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("app_version", DEFAULT_VERSION))
     cur.execute("SELECT value FROM settings WHERE key='version_notes'")
     if cur.fetchone() is None:
         cur.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("version_notes", json.dumps({DEFAULT_VERSION: {"note": "Initial baseline", "timestamp": now_iso()}})))
+    # Ensure build timestamp exists (used to display near version)
+    cur.execute("SELECT value FROM settings WHERE key='app_build_timestamp'")
+    if cur.fetchone() is None:
+        cur.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("app_build_timestamp", now_iso()))
+    # Ensure house_money and simulate_withdrawal defaults
+    cur.execute("SELECT value FROM settings WHERE key='house_money'")
+    if cur.fetchone() is None:
+        cur.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("house_money", "0.0"))
+    cur.execute("SELECT value FROM settings WHERE key='simulate_withdrawal'")
+    if cur.fetchone() is None:
+        cur.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("simulate_withdrawal", "0"))
     conn.commit()
     conn.close()
 
@@ -798,7 +820,6 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
     row["options_count"] = len(options_list)
 
     if not options_list:
-        # record debug info in session
         if "options_debug" not in st.session_state:
             st.session_state.options_debug = {}
         st.session_state.options_debug[sym] = {
@@ -907,7 +928,6 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
         except Exception:
             row["suggestion_expiry"] = suggestion.get("expiry") or None
 
-    # record debug info in session
     if "options_debug" not in st.session_state:
         st.session_state.options_debug = {}
     st.session_state.options_debug[sym] = {
@@ -966,10 +986,27 @@ with st.sidebar:
         db_set_setting("finnhub_api_key", api_key)
         st.session_state.finnhub_client = FinnhubClient(api_key) if api_key else None
         st.success("API key saved.")
-    wheel_capital = st.number_input("Wheel Capital", value=float(db_get_setting("wheel_capital") or 10000.0), step=100.0)
-    db_set_setting("wheel_capital", str(wheel_capital))
-    leap_fund = st.number_input("LEAP Fund", value=float(db_get_setting("leap_fund") or 0.0), step=100.0)
-    db_set_setting("leap_fund", str(leap_fund))
+    # Display app version and build timestamp
+    cur_version = db_get_setting("app_version", DEFAULT_VERSION)
+    build_ts = db_get_setting("app_build_timestamp", "")
+    st.write(f"**Version:** {cur_version}")
+    if build_ts:
+        st.write(f"**Built:** {build_ts}")
+    st.markdown("---")
+    # Wheel capital and house money display and quick edit
+    wheel_capital_val = safe_float(db_get_setting("wheel_capital") or 10000.0)
+    house_money_val = safe_float(db_get_setting("house_money") or 0.0)
+    simulate_flag = db_get_setting("simulate_withdrawal") == "1"
+    st.write("**Wheel Capital (raw):**")
+    st.write(f"${wheel_capital_val:,.2f}")
+    st.write("**House Money (reserved):**")
+    st.write(f"${house_money_val:,.2f}")
+    st.write("**Simulate withdrawal active:**", "Yes" if simulate_flag else "No")
+    st.markdown("---")
+    wheel_capital = st.number_input("Wheel Capital (edit)", value=wheel_capital_val, step=100.0, key="sidebar_wheel_capital")
+    if st.button("Save Wheel Capital"):
+        db_set_setting("wheel_capital", str(wheel_capital))
+        st.success("Wheel capital updated.")
     st.markdown("---")
     st.markdown("### Safe Refresh")
     if st.button("Safe Refresh Now"):
@@ -983,7 +1020,6 @@ with st.sidebar:
             st.error(f"Refresh failed: {e}")
     st.markdown("---")
     st.markdown("### Version Controls")
-    cur_version = db_get_setting("app_version", DEFAULT_VERSION)
     st.write(f"**Current version:** {cur_version}")
     inc_note = st.text_input("Increment note (one-line)", key="inc_note_input")
     if st.button("Increment Version"):
@@ -1034,7 +1070,15 @@ with tab_dashboard:
         open_positions = len(db_list_trades(open_only=True))
         st.metric("Open Positions", f"{open_positions}")
     with cols[2]:
-        st.metric("Wheel Capital", f"${float(db_get_setting('wheel_capital') or 0):,.2f}")
+        # Show adjusted wheel capital if simulate_withdrawal enabled
+        wheel_capital_raw = safe_float(db_get_setting("wheel_capital") or 0.0)
+        house_money = safe_float(db_get_setting("house_money") or 0.0)
+        simulate_withdrawal = db_get_setting("simulate_withdrawal") == "1"
+        if simulate_withdrawal:
+            available = max(0.0, wheel_capital_raw - house_money)
+            st.metric("Wheel Capital (available)", f"${available:,.2f}")
+        else:
+            st.metric("Wheel Capital", f"${wheel_capital_raw:,.2f}")
     with cols[3]:
         vix_quote = st.session_state.market_data.get("__VIX__", {}).get("quote", {})
         vix_val = vix_quote.get("c") if vix_quote else None
@@ -1327,7 +1371,7 @@ with tab_journal:
             st.success("Journal entry added.")
 
 # ---------------------------
-# Settings Tab (with debug log)
+# Settings Tab (with debug log and house money editor)
 # ---------------------------
 with tab_settings:
     st.header("Settings")
@@ -1347,6 +1391,20 @@ with tab_settings:
     st.write("Finnhub API Key stored:", bool(db_get_setting("finnhub_api_key")))
     st.write("Wheel capital:", db_get_setting("wheel_capital"))
     st.write("LEAP fund:", db_get_setting("leap_fund"))
+    st.markdown("---")
+    st.markdown("### House Money / Withdrawal Simulation")
+    current_house = safe_float(db_get_setting("house_money") or 0.0)
+    simulate_flag = db_get_setting("simulate_withdrawal") == "1"
+    st.write(f"Current house money reserved: **${current_house:,.2f}**")
+    st.write(f"Simulate withdrawal active: **{'Yes' if simulate_flag else 'No'}**")
+    with st.form("edit_house_money"):
+        new_house = st.number_input("House money (amount reserved)", value=current_house, step=100.0)
+        new_simulate = st.checkbox("Enable simulate withdrawal (subtract house money from available capital)", value=simulate_flag)
+        submit_house = st.form_submit_button("Save House Money Settings")
+        if submit_house:
+            db_set_setting("house_money", str(new_house))
+            db_set_setting("simulate_withdrawal", "1" if new_simulate else "0")
+            st.success("House money settings updated.")
     st.markdown("---")
     st.markdown("### Options Debug Log")
     if st.session_state.get("debug_mode"):
@@ -1380,7 +1438,11 @@ with tab_settings:
 # ---------------------------
 st.markdown("---")
 cur_version = db_get_setting("app_version", DEFAULT_VERSION)
+build_ts = db_get_setting("app_build_timestamp", "")
 notes = get_version_notes_sorted()
 latest_note = notes[0][1]["note"] if notes else ""
-st.write(f"**Version:** {cur_version} — {latest_note}")
+if build_ts:
+    st.write(f"**Version:** {cur_version} — Built: {build_ts} — {latest_note}")
+else:
+    st.write(f"**Version:** {cur_version} — {latest_note}")
 st.write("WheelOS — Personal tracking tool")
