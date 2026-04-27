@@ -939,6 +939,65 @@ def build_options_table_for_ticker(sym: str, client: Optional[FinnhubClient]) ->
 
     return pd.DataFrame([row])
 
+def diagnostic_fetch_options(sym: str, api_key: str):
+    """
+    Explicit HTTP diagnostics for Finnhub options endpoints and Yahoo fallback.
+    Paste into app and call with diagnostic_fetch_options('AAPL', db_get_setting('finnhub_api_key'))
+    """
+    import requests, json
+    st.markdown("---")
+    st.markdown(f"### Diagnostic fetch for {sym}")
+
+    if not api_key:
+        st.error("No Finnhub API key provided. Save it in the sidebar first.")
+        return
+
+    base = "https://finnhub.io/api/v1"
+    endpoints = [
+        ("option-chain", f"{base}/stock/option-chain"),
+        ("options", f"{base}/stock/options")
+    ]
+    for name, url in endpoints:
+        st.write(f"**Finnhub endpoint**: {name}")
+        try:
+            r = requests.get(url, params={"symbol": sym, "token": api_key}, timeout=15)
+            st.write(f"Status code: {r.status_code}")
+            st.write(f"Content length: {len(r.content) if r.content is not None else 0}")
+            # show first 1000 chars of response text
+            txt = r.text or ""
+            st.code(txt[:1000], language="json")
+            # try to parse JSON keys
+            try:
+                j = r.json()
+                if isinstance(j, dict):
+                    st.write("Top-level keys:", list(j.keys()))
+                else:
+                    st.write("Response is not a dict; type:", type(j))
+            except Exception as e:
+                st.write("JSON parse error:", str(e))
+        except Exception as e:
+            st.write("Request error:", str(e))
+        st.markdown("---")
+
+    # Yahoo fallback diagnostic
+    st.write("**Yahoo options fallback**")
+    try:
+        yahoo_url = f"https://query1.finance.yahoo.com/v7/finance/options/{sym}"
+        r2 = requests.get(yahoo_url, timeout=15)
+        st.write(f"Yahoo status: {r2.status_code}")
+        st.write(f"Yahoo content length: {len(r2.content) if r2.content is not None else 0}")
+        txt2 = r2.text or ""
+        st.code(txt2[:1000], language="json")
+        try:
+            j2 = r2.json()
+            if isinstance(j2, dict):
+                st.write("Yahoo top-level keys:", list(j2.keys()))
+        except Exception as e:
+            st.write("Yahoo JSON parse error:", str(e))
+    except Exception as e:
+        st.write("Yahoo request error:", str(e))
+    st.markdown("Diagnostic fetch complete.")
+
 def force_fetch_and_show_options(sym: str, client: Optional[FinnhubClient]):
     st.markdown("---")
     st.markdown(f"### Force fetch options for {sym}")
@@ -1741,6 +1800,7 @@ with tab_wheel:
     #show_raw_options_debug_for_first_ticker_v2(client)
     client = st.session_state.get("finnhub_client")
     force_fetch_and_show_options("AAPL", client)   # replace "AAPL" with the ticker you want to inspect
+    diagnostic_fetch_options("AAPL", db_get_setting("finnhub_api_key") or "")
 
 
 # ---------------------------
